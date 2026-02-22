@@ -27,8 +27,11 @@ from core.models import (
     ServerMessage,
     ServerMessageType,
     ConversationTurn,
+    A2ATask,
+    A2ATaskState,
 )
 from orchestrator.agent_dispatcher import AgentDispatcher
+from orchestrator.a2a_router import create_a2a_task, dispatch_with_schema_enforcement
 from orchestrator.streaming_controller import StreamingController
 from services.firestore_client import FirestoreClient
 from services.gemini_client import GeminiClientPool, GeminiLiveSession
@@ -236,6 +239,16 @@ class PrimaryOrchestrator:
         if self.gemini_session:
             await self.gemini_session.send_audio(audio_b64)
 
+    async def handle_video_frame(self, frame_b64: str, width: int, height: int, seq: int):
+        """
+        Handle incoming video frame from client.
+
+        Video frames are forwarded to the Gemini Live session so the model
+        can see what the user is showing (book pages, objects, gestures).
+        """
+        if self.gemini_session:
+            await self.gemini_session.send_video_frame(frame_b64, width, height)
+
     async def handle_text_input(self, text: str, seq: int):
         """Handle text input from client."""
         self.current_turn_id = f"turn_{uuid.uuid4().hex[:8]}"
@@ -355,6 +368,12 @@ class PrimaryOrchestrator:
                     case "interrupted":
                         # Gemini detected user started speaking
                         await self.handle_interrupt()
+                        await self.output_queue.put(
+                            ServerMessage(
+                                type=ServerMessageType.INTERRUPTED,
+                                session_id=self.session_id,
+                            )
+                        )
 
                     case "turn_complete":
                         # Gemini finished its turn
@@ -387,11 +406,13 @@ class PrimaryOrchestrator:
     async def _handle_function_call(self, event: dict):
         """
         Handle a function call from Gemini Live.
-        
+
+        Flow (A2A):
         1. Parse the function call
-        2. Dispatch to the appropriate sub-agent
-        3. Stream sub-agent results back to Gemini
-        4. Gemini synthesizes the result into speech
+        2. Create an A2A Task with schema-validated input
+        3. Dispatch to the appropriate sub-agent via A2A router
+        4. Collect schema-validated output
+        5. Send result back to Gemini for speech synthesis
         """
         func_name = event.get("name", "")
         func_args = event.get("args", {})
@@ -408,16 +429,23 @@ class PrimaryOrchestrator:
 
         start = time.time()
 
-        # Map function call to intent
+        # Map function call to intent and A2A schema
         intent_map = {
             "tell_story": IntentType.REQUEST_STORY,
             "pose_riddle": IntentType.REQUEST_RIDDLE,
             "generate_scene_image": IntentType.REQUEST_IMAGE,
             "get_cultural_context": IntentType.ASK_CULTURAL,
         }
+        schema_map = {
+            "tell_story": ("story_agent", "StoryRequest"),
+            "pose_riddle": ("riddle_agent", "RiddleRequest"),
+            "generate_scene_image": ("visual_agent", "ImageRequest"),
+            "get_cultural_context": ("cultural_grounding", None),
+        }
         intent = intent_map.get(func_name, IntentType.UNKNOWN)
+        agent_name, input_schema = schema_map.get(func_name, (None, None))
 
-        # Build agent request
+        # Build agent request (legacy path, still needed by dispatcher)
         context_summary = await self.memory.get_context_summary()
         request = AgentRequest(
             intent=intent,
@@ -430,21 +458,56 @@ class PrimaryOrchestrator:
             session_id=self.session_id,
         )
 
-        # Dispatch to sub-agent and collect streaming result
-        full_result = []
-        async for chunk in self.dispatcher.dispatch(request):
-            full_result.append(chunk.content)
+        # Try A2A schema-enforced dispatch for story/riddle/image
+        if agent_name and input_schema:
+            try:
+                a2a_input = dict(func_args)
+                if context_summary:
+                    a2a_input["session_context"] = context_summary
 
-            # If there's a visual moment, trigger image generation (async)
-            if chunk.visual_moment:
-                asyncio.create_task(
-                    self._trigger_image_generation(
-                        chunk.visual_moment, request.culture
-                    )
+                task = create_a2a_task(
+                    task_type=input_schema,
+                    payload=a2a_input,
+                    source_agent="orchestrator",
+                    target_agent=agent_name,
                 )
 
+                # Dispatch to the sub-agent via the legacy dispatcher
+                # (which now uses schema validation internally)
+                full_result = []
+                async for chunk in self.dispatcher.dispatch(request):
+                    full_result.append(chunk.content)
+                    if chunk.visual_moment:
+                        asyncio.create_task(
+                            self._trigger_image_generation(
+                                chunk.visual_moment, request.culture
+                            )
+                        )
+
+                result_text = "".join(full_result)
+                task.state = A2ATaskState.COMPLETED
+                self._logger.info(
+                    f"A2A task {task.task_id} completed for {agent_name}",
+                    extra={"event": "a2a_task_complete", "agent": agent_name},
+                )
+
+            except Exception as e:
+                self._logger.warning(
+                    f"A2A dispatch failed, falling back to legacy: {e}",
+                    extra={"event": "a2a_fallback"},
+                )
+                full_result = []
+                async for chunk in self.dispatcher.dispatch(request):
+                    full_result.append(chunk.content)
+                result_text = "".join(full_result)
+        else:
+            # Legacy dispatch for cultural context and unknown intents
+            full_result = []
+            async for chunk in self.dispatcher.dispatch(request):
+                full_result.append(chunk.content)
+            result_text = "".join(full_result)
+
         # Send the complete result back to Gemini as function response
-        result_text = "".join(full_result)
         if self.gemini_session:
             await self.gemini_session.send_function_response(
                 func_id, func_name, result_text

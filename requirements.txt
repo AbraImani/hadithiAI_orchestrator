@@ -1,30 +1,37 @@
 # ─────────────────────────────────────────────────
-# HadithiAI Live — Python Dependencies
+# HadithiAI Live -- Python Dependencies
 # ─────────────────────────────────────────────────
 
-# ── Web Framework & Server ──
+# -- Web Framework & Server --
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 websockets==14.1
 python-multipart==0.0.19
 
-# ── Google Cloud ──
+# -- Google Cloud --
 google-cloud-firestore==2.19.0
 google-cloud-storage==2.19.0
 google-cloud-aiplatform==1.74.0
 google-cloud-logging==3.11.3
 google-genai==1.1.0
 
-# ── Configuration ──
+# -- Google ADK & A2A --
+google-adk>=0.5.0
+google-a2a>=0.2.0
+
+# -- Schema Validation --
+jsonschema>=4.20.0
+
+# -- Configuration --
 pydantic==2.10.4
 pydantic-settings==2.7.1
 python-dotenv==1.0.1
 
-# ── Async Utilities ──
+# -- Async Utilities --
 aiohttp==3.11.11
 aiofiles==24.1.0
 
-# ── Observability ──
+# -- Observability --
 opentelemetry-api==1.29.0
 opentelemetry-sdk==1.29.0
 opentelemetry-exporter-gcp-trace==1.9.0

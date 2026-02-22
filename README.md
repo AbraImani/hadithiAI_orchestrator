@@ -1,77 +1,82 @@
-# 🌍 HadithiAI Live
+# HadithiAI Live
 
 ### The First African Immersive Oral AI Agent
 
-> A real-time, multimodal, multi-agent oral storytelling system rooted in African cultural traditions. Powered by Google Gemini Live API with bidirectional audio/text streaming.
+> A real-time, multimodal, multi-agent oral storytelling system rooted in African cultural traditions. Built with Google ADK (Agent Development Kit), A2A protocol, and Gemini Live API for bidirectional audio/text/vision streaming.
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 hadithiAI_orchestrator/
-│
-├── 📄 README.md                          ← You are here
-├── 📄 requirements.txt                   ← Python dependencies
-├── 📄 Dockerfile                         ← Container image definition
-├── 📄 .env.example                       ← Environment variables template
-├── 📄 .gitignore                         ← Git ignore rules
-│
-├── 📂 docs/
-│   └── 📄 ARCHITECTURE.md               ← Full architecture document
-│
-├── 📂 src/                               ← Application source code
-│   ├── 📄 main.py                        ← FastAPI entry point
-│   │
-│   ├── 📂 core/                          ← Core configuration & models
-│   │   ├── 📄 __init__.py
-│   │   ├── 📄 config.py                  ← Pydantic settings (env vars)
-│   │   ├── 📄 models.py                  ← All Pydantic data models
-│   │   └── 📄 logging_config.py          ← Structured logging setup
-│   │
-│   ├── 📂 gateway/                       ← WebSocket gateway layer
-│   │   ├── 📄 __init__.py
-│   │   ├── 📄 websocket_handler.py       ← WebSocket endpoint & connection mgmt
-│   │   └── 📄 health.py                  ← Health check endpoints
-│   │
-│   ├── 📂 orchestrator/                  ← Central orchestration layer
-│   │   ├── 📄 __init__.py
-│   │   ├── 📄 primary_orchestrator.py    ← Main orchestrator (brain)
-│   │   ├── 📄 agent_dispatcher.py        ← Routes requests to sub-agents
-│   │   ├── 📄 streaming_controller.py    ← Output stream management
-│   │   └── 📄 circuit_breaker.py         ← Fault tolerance pattern
-│   │
-│   ├── 📂 agents/                        ← Specialized sub-agents
-│   │   ├── 📄 __init__.py
-│   │   ├── 📄 base_agent.py             ← Abstract base agent class
-│   │   ├── 📄 story_agent.py            ← African story generation
-│   │   ├── 📄 riddle_agent.py           ← Interactive riddle games
-│   │   ├── 📄 cultural_agent.py         ← Cultural grounding & validation
-│   │   └── 📄 visual_agent.py           ← Imagen 3 image generation
-│   │
-│   └── 📂 services/                      ← External service clients
-│       ├── 📄 __init__.py
-│       ├── 📄 gemini_client.py           ← Gemini Live API + text generation
-│       ├── 📄 firestore_client.py        ← Firestore operations
-│       └── 📄 memory_manager.py          ← Session & conversation memory
-│
-├── 📂 static/                            ← Web client
-│   └── 📄 index.html                    ← Single-page web client
-│
-├── 📂 infrastructure/                    ← Infrastructure-as-Code
-│   └── 📄 main.tf                       ← Terraform configuration
-│
-├── 📂 scripts/                           ← Deployment scripts
-│   ├── 📄 deploy.sh                     ← Linux/Mac deployment
-│   └── 📄 deploy.ps1                    ← Windows PowerShell deployment
-│
-└── 📂 tests/                             ← Test suite
-    └── 📄 test_orchestrator.py           ← Orchestrator unit tests
+|
++-- README.md                             <- You are here
++-- requirements.txt                      <- Python dependencies
++-- Dockerfile                            <- Container image definition
++-- .env.example                          <- Environment variables template
++-- .gitignore                            <- Git ignore rules
+|
++-- docs/
+|   +-- ARCHITECTURE.md                   <- Full architecture document (v3.0)
+|
++-- src/                                  <- Application source code
+|   +-- main.py                           <- FastAPI entry point
+|   |
+|   +-- core/                             <- Core configuration, models & schemas
+|   |   +-- __init__.py
+|   |   +-- config.py                     <- Pydantic settings (env vars)
+|   |   +-- models.py                     <- Pydantic data models + A2ATask
+|   |   +-- schemas.py                    <- JSON schema contracts (A2A)
+|   |   +-- logging_config.py            <- Structured logging setup
+|   |
+|   +-- gateway/                          <- WebSocket gateway layer
+|   |   +-- __init__.py
+|   |   +-- websocket_handler.py          <- WebSocket endpoint (audio/text/video)
+|   |   +-- health.py                     <- Health check endpoints
+|   |
+|   +-- orchestrator/                     <- Central orchestration layer
+|   |   +-- __init__.py
+|   |   +-- primary_orchestrator.py       <- Main orchestrator (ADK root agent)
+|   |   +-- agent_dispatcher.py           <- Routes requests to sub-agents
+|   |   +-- a2a_router.py                <- A2A task routing + schema enforcement
+|   |   +-- streaming_controller.py       <- Output stream management
+|   |   +-- circuit_breaker.py            <- Fault tolerance pattern
+|   |
+|   +-- agents/                           <- ADK-compatible sub-agents
+|   |   +-- __init__.py
+|   |   +-- base_agent.py                <- Abstract base (execute/execute_streaming)
+|   |   +-- story_agent.py               <- Story generation (StoryChunk output)
+|   |   +-- riddle_agent.py              <- Riddle generation (RiddlePayload output)
+|   |   +-- cultural_agent.py            <- Cultural grounding (ValidatedChunk output)
+|   |   +-- visual_agent.py              <- Image generation (ImageResult output)
+|   |   +-- memory_agent.py              <- Session memory (ADK ParallelAgent)
+|   |
+|   +-- services/                         <- External service clients
+|       +-- __init__.py
+|       +-- gemini_client.py              <- Gemini Live API + text generation
+|       +-- firestore_client.py           <- Firestore operations
+|       +-- storage_client.py             <- Cloud Storage operations
+|       +-- memory_manager.py             <- Session & conversation memory
+|
++-- static/                               <- Web client
+|   +-- index.html                        <- Single-page web client
+|
++-- infrastructure/                       <- Infrastructure-as-Code
+|   +-- main.tf                           <- Terraform configuration
+|
++-- scripts/                              <- Deployment scripts
+|   +-- deploy.sh                         <- Linux/Mac deployment
+|   +-- deploy.ps1                        <- Windows PowerShell deployment
+|
++-- tests/                                <- Test suite
+    +-- test_orchestrator.py              <- Orchestrator unit tests
+    +-- test_schemas.py                   <- Schema contract tests
 ```
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -133,73 +138,105 @@ terraform apply -var="project_id=your-project-id"
 
 ---
 
-## 🏗️ Architecture Summary
+## Architecture Overview
+
+HadithiAI uses a **Google ADK multi-agent hierarchy** with **A2A (Agent-to-Agent) protocol** for typed inter-agent communication. Every agent boundary is guarded by **JSON schema validation** (Draft-07).
 
 ```mermaid
 graph TB
-  Client["🎤 Client<br/>Audio + Text"] <-->|WebSocket| Gateway["🔌 Cloud Run Gateway"]
-  Gateway --> Orch["🧠 Primary Orchestrator"]
-  Orch --> Story["📖 Story Agent"]
-  Orch --> Riddle["🧩 Riddle Agent"]
-  Orch --> Cultural["🌍 Cultural Grounding"]
-  Story --> Gemini["⚡ Gemini 2.0 Flash<br/>streaming"]
+  Client["Client<br/>Audio + Text + Video"] <-->|WebSocket| Gateway["Cloud Run Gateway"]
+  Gateway --> Orch["Primary Orchestrator<br/>(ADK Root Agent)"]
+
+  subgraph ADK["ADK Agent Hierarchy"]
+    Orch -->|A2A Task| StoryPipeline["SequentialAgent<br/>Story Pipeline"]
+    Orch -->|A2A Task| RiddlePipeline["SequentialAgent<br/>Riddle Pipeline"]
+    Orch -->|A2A Task| Enrichment["ParallelAgent<br/>Enrichment"]
+
+    StoryPipeline --> Story["StoryAgent<br/>StoryChunk"]
+    StoryPipeline --> Cultural1["CulturalGrounding<br/>ValidatedChunk"]
+
+    RiddlePipeline --> Riddle["RiddleAgent<br/>RiddlePayload"]
+    RiddlePipeline --> Cultural2["CulturalGrounding<br/>ValidatedChunk"]
+
+    Enrichment --> Visual["VisualAgent<br/>ImageResult"]
+    Enrichment --> Memory["MemoryAgent"]
+  end
+
+  Story --> Gemini["Gemini 2.0 Flash"]
   Riddle --> Gemini
-  Cultural --> Gemini
-  Orch -.->|async| Visual["🎨 Visual Agent"]
-  Visual --> Imagen["🖼️ Imagen 3"]
-  Imagen --> Storage["📦 Cloud Storage"]
+  Visual --> Imagen["Vertex AI Imagen 3"]
+  Imagen --> Storage["Cloud Storage"]
 ```
 
-**Key Design Decisions:**
-- **Single Cloud Run service** — all agents run in-process for minimal latency
-- **Gemini Live API function calling** — intent detection triggers sub-agents
-- **Cultural Grounding in hot path** — every response is validated
-- **Async image generation** — never blocks the conversation
-- **Circuit breakers** — graceful degradation when sub-agents fail
+### A2A Schema Contracts
+
+Every agent declares input/output schemas. The A2A router validates data at every boundary:
+
+| Agent | Input Schema | Output Schema |
+|-------|-------------|---------------|
+| StoryAgent | StoryRequest | StoryChunk |
+| RiddleAgent | RiddleRequest | RiddlePayload |
+| CulturalGrounding | StoryChunk | ValidatedChunk |
+| VisualAgent | ImageRequest | ImageResult |
+| MemoryAgent | (internal) | (internal) |
+
+### Key Design Decisions
+
+- **Single Cloud Run service** -- all agents run in-process for minimal latency
+- **Gemini Live API function calling** -- intent detection triggers sub-agents
+- **ADK agent hierarchy** -- SequentialAgent and ParallelAgent composition patterns
+- **A2A typed tasks** -- JSON schema enforcement on every agent boundary
+- **Cultural Grounding in hot path** -- every story/riddle response is validated
+- **Async image generation** -- never blocks the conversation stream
+- **Video frame support** -- Gemini Live receives camera frames for vision tasks
+- **Circuit breakers** -- graceful degradation when sub-agents fail
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the complete architecture document.
 
 ---
 
-## 🎯 Hackathon Evaluation Targets
+## Hackathon Evaluation Targets
 
 | Criteria | Weight | Our Approach |
 |----------|--------|-------------|
 | **Innovation** | 40% | First African oral AI agent; cultural grounding as architecture |
-| **Architecture** | 30% | Multi-agent hierarchy; streaming-first; fault-tolerant |
-| **Demo** | 30% | Live voice conversation; interruption; cultural switching |
+| **Architecture** | 30% | ADK multi-agent hierarchy; A2A schema contracts; streaming-first |
+| **Demo** | 30% | Live voice conversation; interruption; cultural switching; vision |
 
 ---
 
-## 📊 Performance Targets
+## Performance Targets
 
 | Metric | Target |
 |--------|--------|
 | Time to first audio byte | < 800ms |
 | End-to-end perceived latency | < 500ms (streaming) |
 | Cultural validation latency | < 50ms (hot path) |
+| Schema validation overhead | < 1ms per boundary |
 | Image generation | 5-15s (async, non-blocking) |
 | Concurrent sessions per instance | 80 |
 
 ---
 
-## 🛡️ Key Features
+## Key Features
 
-- ✅ **Real-time bidirectional streaming** (Gemini Live API)
-- ✅ **User interruption handling** (speak over the AI)
-- ✅ **Multi-agent orchestration** (Story, Riddle, Cultural, Visual)
-- ✅ **Cultural grounding validation** (hot path, every response)
-- ✅ **Hallucination mitigation** (6-layer defense)
-- ✅ **Fault tolerance** (circuit breakers, graceful degradation)
-- ✅ **Session memory** (Firestore, no authentication required)
-- ✅ **Image generation** (Imagen 3, async)
-- ✅ **Observability** (structured logging, Cloud Trace)
-- ✅ **One-command deployment** (Cloud Run)
+- Real-time bidirectional streaming (Gemini Live API)
+- Video/vision input support (camera frames to Gemini)
+- User interruption handling (speak over the AI)
+- ADK multi-agent orchestration (Story, Riddle, Cultural, Visual, Memory)
+- A2A protocol with JSON schema contracts at every agent boundary
+- Cultural grounding validation (hot path, every response)
+- Hallucination mitigation (6-layer defense)
+- Fault tolerance (circuit breakers, graceful degradation)
+- Session memory (Firestore, no authentication required)
+- Async image generation (Imagen 3, non-blocking)
+- Observability (structured logging, Cloud Trace)
+- One-command deployment (Cloud Run)
 
 ---
 
-## 📝 License
+## License
 
 Built for the Google Gemini API Developer Competition.
 
-Made with ❤️ for Africa's oral traditions.
+Made with care for Africa's oral traditions.

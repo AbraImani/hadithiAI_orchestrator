@@ -201,6 +201,32 @@ class GeminiLiveSession:
         except Exception as e:
             self._logger.error(f"Failed to send text: {e}")
 
+    async def send_video_frame(self, frame_b64: str, width: int = 640, height: int = 480):
+        """
+        Send a video frame to Gemini Live for vision understanding.
+
+        The frame is base64-encoded JPEG or PNG. The Gemini Live API
+        accepts inline image data as part of realtime input so the model
+        can see what the user is showing (book pages, cultural objects).
+        """
+        if not self._is_connected:
+            return
+        try:
+            import base64
+            from google.genai import types
+
+            frame_bytes = base64.b64decode(frame_b64)
+            await self._live.send(
+                input=types.LiveClientRealtimeInput(
+                    media_chunks=[types.Blob(
+                        data=frame_bytes,
+                        mime_type="image/jpeg",
+                    )]
+                )
+            )
+        except Exception as e:
+            self._logger.error(f"Failed to send video frame: {e}")
+
     async def send_function_response(self, func_id: str, func_name: str, result: str):
         """Send a function call response back to Gemini Live."""
         if not self._is_connected:

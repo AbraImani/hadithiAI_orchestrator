@@ -1,30 +1,44 @@
 """
-Story Agent
-===========
+Story Agent (ADK-Compatible)
+=============================
 Generates culturally-rooted African stories in the oral tradition style.
+Outputs StoryChunk schema-compliant dicts with explicit cultural_claims[].
 Streams stories paragraph-by-paragraph for natural pacing.
 """
 
+import json
+import logging
 from typing import AsyncIterator
 
 from agents.base_agent import BaseAgent
 from core.models import AgentRequest, AgentResponse
+from core.schemas import schema_validator
+
+logger = logging.getLogger(__name__)
 
 
 class StoryAgent(BaseAgent):
     """
     Generates immersive African oral tradition stories.
-    
+
+    ADK Agent Properties:
+    - name: story_agent
+    - model: gemini-2.0-flash
+    - output_schema: StoryChunk
+    - tools: cultural_lookup
+
     Features:
     - Streams in paragraph-sized chunks for natural pacing
+    - Each chunk includes explicit cultural_claims[] for validation
     - Adapts tone/complexity based on audience
     - Embeds proverbs, call-and-response, and moral lessons
     - Marks visual moments for optional image generation
     """
 
     AGENT_NAME = "story"
+    OUTPUT_SCHEMA = "StoryChunk"
 
-    SYSTEM_INSTRUCTION = """You are the Story Generation Engine of HadithiAI, 
+    SYSTEM_INSTRUCTION = """You are the Story Generation Engine of HadithiAI,
 a master African oral storyteller (Griot).
 
 Your stories must:
@@ -52,8 +66,35 @@ Anti-hallucination rules:
 - Only use cultural elements you are confident about
 - If referencing a specific tradition, it must be real
 - Prefix uncertain claims with "In some tellings..."
-- Do not invent proverbs — use known ones or mark as "inspired by"
+- Do not invent proverbs -- use known ones or mark as "inspired by"
 - Name the specific ethnic group, not just the country"""
+
+    STRUCTURED_INSTRUCTION = """You are the Story Generation Engine of HadithiAI.
+
+Generate a story chunk as a JSON object with this exact structure:
+{
+  "text": "The story text for this chunk",
+  "culture": "the culture this references",
+  "cultural_claims": [
+    {"claim": "specific cultural assertion", "category": "character|proverb|custom|location|language|historical"}
+  ],
+  "scene_description": "optional visual scene description or null",
+  "is_final": false
+}
+
+CRITICAL: Every cultural assertion in the text MUST be listed in cultural_claims.
+If you mention a character, proverb, custom, or tradition, declare it explicitly.
+This forces you to be conscious of what you are asserting.
+
+Categories for claims:
+- "character": Named figures, tricksters, heroes
+- "proverb": Sayings, wisdom quotes
+- "custom": Cultural practices, ceremonies
+- "location": Places, geographical references
+- "language": Words, phrases in local languages
+- "historical": Historical events or periods
+
+Respond ONLY with valid JSON. No markdown, no code blocks."""
 
     async def generate(self, request: AgentRequest) -> AsyncIterator[AgentResponse]:
         """Generate a streaming story based on the request."""
@@ -75,13 +116,11 @@ Anti-hallucination rules:
             # Detect visual moments and extract them
             visual_moment = None
             if "[VISUAL:" in current_chunk:
-                # Extract the visual description
                 start_idx = current_chunk.index("[VISUAL:")
                 end_idx = current_chunk.index("]", start_idx)
                 if end_idx > start_idx:
                     visual_desc = current_chunk[start_idx + 8:end_idx].strip()
                     visual_moment = visual_desc
-                    # Remove the marker from the text
                     current_chunk = (
                         current_chunk[:start_idx] + current_chunk[end_idx + 1:]
                     )
@@ -104,8 +143,75 @@ Anti-hallucination rules:
                 is_final=False,
             )
 
+    async def execute_streaming(self, input_data: dict) -> AsyncIterator[dict]:
+        """
+        ADK-compatible streaming: yields StoryChunk dicts.
+        Each chunk includes explicit cultural_claims[] for validation.
+        """
+        culture = input_data.get("culture", "african")
+        theme = input_data.get("theme", "wisdom")
+        complexity = input_data.get("complexity", "adult")
+        context = input_data.get("session_context", "")
+        correction = input_data.get("_correction", "")
+
+        prompt = self._build_structured_prompt(
+            culture, theme, complexity, context, correction
+        )
+
+        full_text = await self._generate_structured_json(
+            prompt, self.STRUCTURED_INSTRUCTION
+        )
+
+        # Parse JSON chunks from the response
+        chunks = self._parse_story_chunks(full_text, culture)
+
+        for i, chunk in enumerate(chunks):
+            chunk["is_final"] = (i == len(chunks) - 1)
+            # Validate before yielding
+            is_valid, errors = schema_validator.validate("StoryChunk", chunk)
+            if is_valid:
+                yield chunk
+            else:
+                self.logger.warning(
+                    f"StoryChunk validation failed: {errors}",
+                    extra={"event": "story_chunk_invalid"},
+                )
+                # Fix minimally and yield
+                yield {
+                    "text": chunk.get("text", "The story continues..."),
+                    "culture": culture,
+                    "cultural_claims": [],
+                    "is_final": chunk.get("is_final", False),
+                }
+
+    async def execute(self, input_data: dict) -> dict:
+        """ADK-compatible single-shot: returns a full StoryChunk."""
+        chunks = []
+        async for chunk in self.execute_streaming(input_data):
+            chunks.append(chunk)
+
+        if chunks:
+            # Merge all chunks into one
+            merged_text = " ".join(c.get("text", "") for c in chunks)
+            all_claims = []
+            for c in chunks:
+                all_claims.extend(c.get("cultural_claims", []))
+            return {
+                "text": merged_text,
+                "culture": input_data.get("culture", "african"),
+                "cultural_claims": all_claims,
+                "is_final": True,
+            }
+
+        return {
+            "text": "The story awaits...",
+            "culture": input_data.get("culture", "african"),
+            "cultural_claims": [],
+            "is_final": True,
+        }
+
     def _build_prompt(self, request: AgentRequest) -> str:
-        """Build the story generation prompt."""
+        """Build the story generation prompt for streaming mode."""
         culture = request.culture or "a West African"
         theme = request.theme or "wisdom"
         complexity = request.age_group or "adult"
@@ -115,7 +221,7 @@ Anti-hallucination rules:
             context_section = f"""
 CONVERSATION CONTEXT:
 {request.session_context}
-Continue the conversation naturally. If there's an ongoing story, 
+Continue the conversation naturally. If there's an ongoing story,
 continue it rather than starting a new one unless asked."""
 
         return f"""Generate an immersive African oral tradition story.
@@ -132,6 +238,79 @@ rhythmic, and engaging. Use the oral tradition patterns of the {culture} people.
 
 Begin the story now:"""
 
+    def _build_structured_prompt(
+        self,
+        culture: str,
+        theme: str,
+        complexity: str,
+        context: str,
+        correction: str,
+    ) -> str:
+        """Build prompt for structured JSON output."""
+        parts = [
+            f"Generate an African oral tradition story as structured JSON.",
+            f"Culture: {culture}",
+            f"Theme: {theme}",
+            f"Audience: {complexity}",
+        ]
+        if context:
+            parts.append(f"Context: {context}")
+        if correction:
+            parts.append(f"CORRECTION: {correction}")
+
+        parts.append(
+            "Generate 3-5 JSON chunks, each a complete paragraph. "
+            "Every cultural reference MUST appear in cultural_claims[]."
+        )
+
+        return "\n".join(parts)
+
+    def _parse_story_chunks(self, raw_text: str, default_culture: str) -> list[dict]:
+        """Parse Gemini output into StoryChunk dicts."""
+        chunks = []
+
+        # Try to parse as JSON array
+        cleaned = raw_text.strip()
+        if cleaned.startswith("```"):
+            # Remove markdown code blocks
+            lines = cleaned.split("\n")
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            cleaned = "\n".join(lines).strip()
+
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, list):
+                chunks = parsed
+            elif isinstance(parsed, dict):
+                chunks = [parsed]
+        except json.JSONDecodeError:
+            # Try to find JSON objects in the text
+            import re
+            json_pattern = re.compile(r'\{[^{}]*\}', re.DOTALL)
+            matches = json_pattern.findall(cleaned)
+            for match in matches:
+                try:
+                    obj = json.loads(match)
+                    if "text" in obj:
+                        chunks.append(obj)
+                except json.JSONDecodeError:
+                    continue
+
+        # If no valid JSON found, wrap raw text as a single chunk
+        if not chunks:
+            chunks = [{
+                "text": raw_text.strip() if raw_text.strip() else "The story begins...",
+                "culture": default_culture,
+                "cultural_claims": [],
+            }]
+
+        # Ensure all chunks have required fields
+        for chunk in chunks:
+            chunk.setdefault("culture", default_culture)
+            chunk.setdefault("cultural_claims", [])
+
+        return chunks
+
     @staticmethod
     def _is_chunk_boundary(text: str) -> bool:
         """Check if we're at a natural boundary to yield a chunk."""
@@ -139,24 +318,17 @@ Begin the story now:"""
         if not text:
             return False
 
-        # Paragraph break
         if text.endswith("\n\n"):
             return True
-
-        # Scene break marker
         if "[SCENE_BREAK]" in text:
             return True
-
-        # Call-and-response marker
         if "[CALL_RESPONSE]" in text:
             return True
 
-        # Sentence end with minimum length
         sentence_enders = (".", "!", "?", '..."')
         if len(text) > 80 and any(text.endswith(e) for e in sentence_enders):
             return True
 
-        # Force break at max length
         if len(text) > 300:
             return True
 

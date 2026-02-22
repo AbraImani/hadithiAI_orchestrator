@@ -185,15 +185,18 @@ class TestCulturalKnowledge:
 
     def test_knowledge_base_populated(self):
         from agents.cultural_agent import CULTURAL_KNOWLEDGE
-        
+
         assert "story_openings" in CULTURAL_KNOWLEDGE
-        assert "swahili" in CULTURAL_KNOWLEDGE["story_openings"]
-        assert "yoruba" in CULTURAL_KNOWLEDGE["story_openings"]
-        assert "zulu" in CULTURAL_KNOWLEDGE["story_openings"]
+        swahili_openings = CULTURAL_KNOWLEDGE["story_openings"]["swahili"]
+        yoruba_openings = CULTURAL_KNOWLEDGE["story_openings"]["yoruba"]
+        zulu_openings = CULTURAL_KNOWLEDGE["story_openings"]["zulu"]
+        assert len(swahili_openings) > 0
+        assert len(yoruba_openings) > 0
+        assert len(zulu_openings) > 0
 
     def test_proverbs_available(self):
         from agents.cultural_agent import CULTURAL_KNOWLEDGE
-        
+
         proverbs = CULTURAL_KNOWLEDGE["proverbs"]
         assert len(proverbs["swahili"]) >= 2
         assert len(proverbs["yoruba"]) >= 2
@@ -201,10 +204,11 @@ class TestCulturalKnowledge:
 
     def test_trickster_figures(self):
         from agents.cultural_agent import CULTURAL_KNOWLEDGE
-        
+
         figures = CULTURAL_KNOWLEDGE["trickster_figures"]
-        assert "anansi" in figures["ashanti"].lower()
-        assert "hare" in figures["zulu"].lower()
+        # Each entry is a dict with 'name', 'type', 'verified' fields
+        assert "anansi" in figures["ashanti"]["name"].lower()
+        assert "hare" in figures["zulu"]["name"].lower()
 
 
 # ─── Config Tests ─────────────────────────────────────
@@ -260,6 +264,7 @@ class TestIntegrationFlow:
         assert ClientMessageType.TEXT_INPUT
         assert ClientMessageType.INTERRUPT
         assert ClientMessageType.CONTROL
+        assert ClientMessageType.VIDEO_FRAME
         
         # Server must support
         assert ServerMessageType.AUDIO_CHUNK
@@ -267,3 +272,4 @@ class TestIntegrationFlow:
         assert ServerMessageType.IMAGE_READY
         assert ServerMessageType.TURN_END
         assert ServerMessageType.ERROR
+        assert ServerMessageType.INTERRUPTED

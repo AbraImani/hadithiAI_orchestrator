@@ -3,7 +3,7 @@ Agent Dispatcher
 ================
 Routes requests from the Orchestrator to the appropriate sub-agents.
 Handles parallel agent execution, cultural grounding validation,
-and result merging.
+and result merging. Uses A2A schema validation on agent boundaries.
 """
 
 import asyncio
@@ -13,6 +13,7 @@ from typing import AsyncIterator, Optional
 
 from core.config import settings
 from core.models import AgentRequest, AgentResponse, IntentType
+from core.schemas import schema_validator, SchemaViolationError
 from agents.story_agent import StoryAgent
 from agents.riddle_agent import RiddleAgent
 from agents.cultural_agent import CulturalGroundingAgent
@@ -150,23 +151,25 @@ class AgentDispatcher:
     ) -> AsyncIterator[AgentResponse]:
         """
         Run an agent's output through cultural grounding validation.
-        
+
         Strategy: Validate each chunk as it arrives. If cultural agent
         is down, pass through with a warning (graceful degradation).
+        Uses the CulturalGroundingAgent.validate_agent_response() method
+        which accepts an AgentResponse and returns a validated AgentResponse.
         """
         cultural_breaker = self.breakers["cultural"]
 
         async for chunk in agent_stream:
             if cultural_breaker.is_open():
-                # Cultural agent is down — pass through with reduced confidence
+                # Cultural agent is down -- pass through with reduced confidence
                 chunk.cultural_confidence = 0.5
                 yield chunk
                 continue
 
             try:
                 validated = await asyncio.wait_for(
-                    self.cultural_agent.validate_chunk(chunk),
-                    timeout=2.0,  # Tight timeout — don't block stream
+                    self.cultural_agent.validate_agent_response(chunk),
+                    timeout=2.0,  # Tight timeout -- don't block stream
                 )
                 yield validated
             except (asyncio.TimeoutError, Exception) as e:
@@ -182,18 +185,34 @@ class AgentDispatcher:
     async def generate_image(
         self, scene_description: str, culture: Optional[str]
     ) -> Optional[str]:
-        """Generate an image asynchronously. Returns URL or None."""
+        """
+        Generate an image asynchronously. Returns URL or None.
+
+        Also validates the input against ImageRequest schema when possible.
+        """
         breaker = self.breakers["visual"]
 
         if breaker.is_open():
             return None
 
         try:
-            url = await asyncio.wait_for(
-                self.visual_agent.generate_image(scene_description, culture),
+            # Use the ADK-compatible execute() path
+            input_data = {
+                "scene_description": scene_description,
+                "culture": culture or "African",
+            }
+            try:
+                schema_validator.validate("ImageRequest", input_data)
+            except SchemaViolationError:
+                pass  # Non-critical, proceed anyway
+
+            result = await asyncio.wait_for(
+                self.visual_agent.execute(input_data),
                 timeout=30.0,
             )
-            return url
+            if result.get("status") == "success":
+                return result.get("url")
+            return None
         except Exception as e:
             breaker.record_failure()
             self._logger.warning(f"Image generation failed: {e}")

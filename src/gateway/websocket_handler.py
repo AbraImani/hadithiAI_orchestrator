@@ -134,6 +134,14 @@ async def _receive_loop(conn: ConnectionState):
                 case ClientMessageType.TEXT_INPUT:
                     await conn.orchestrator.handle_text_input(msg.data, msg.seq)
 
+                case ClientMessageType.VIDEO_FRAME:
+                    await conn.orchestrator.handle_video_frame(
+                        msg.data,
+                        msg.width or 640,
+                        msg.height or 480,
+                        msg.seq,
+                    )
+
                 case ClientMessageType.INTERRUPT:
                     await conn.orchestrator.handle_interrupt()
 
