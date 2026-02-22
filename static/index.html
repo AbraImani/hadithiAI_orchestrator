@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🌍 HadithiAI Live</title>
+    <style>
+        :root {
+            --bg-primary: #1a1a2e;
+            --bg-secondary: #16213e;
+            --bg-card: #0f3460;
+            --accent: #e94560;
+            --accent-warm: #f2a365;
+            --text-primary: #eee;
+            --text-secondary: #aab;
+            --text-muted: #667;
+            --success: #00d2ff;
+            --border-radius: 16px;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background: var(--bg-secondary);
+            padding: 1rem 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 2px solid var(--accent);
+        }
+
+        .logo {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--accent-warm);
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #666;
+            transition: background 0.3s;
+        }
+
+        .status-dot.connected { background: #00ff88; }
+        .status-dot.streaming { background: var(--accent-warm); animation: pulse 1s infinite; }
+        .status-dot.error { background: var(--accent); }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            max-width: 900px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 1rem;
+            gap: 1rem;
+        }
+
+        .conversation {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            padding: 1rem;
+        }
+
+        .message {
+            max-width: 80%;
+            padding: 1rem 1.25rem;
+            border-radius: var(--border-radius);
+            line-height: 1.6;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background: var(--bg-card);
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.agent {
+            align-self: flex-start;
+            background: var(--bg-secondary);
+            border-bottom-left-radius: 4px;
+            border-left: 3px solid var(--accent-warm);
+        }
+
+        .message .agent-label {
+            font-size: 0.75rem;
+            color: var(--accent-warm);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.5rem;
+        }
+
+        .message img {
+            max-width: 100%;
+            border-radius: 8px;
+            margin-top: 0.75rem;
+        }
+
+        .controls {
+            display: flex;
+            gap: 1rem;
+            padding: 1rem;
+            background: var(--bg-secondary);
+            border-radius: var(--border-radius);
+            align-items: center;
+        }
+
+        .text-input {
+            flex: 1;
+            padding: 0.75rem 1rem;
+            border: 2px solid transparent;
+            border-radius: 12px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 1rem;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+
+        .text-input:focus {
+            border-color: var(--accent-warm);
+        }
+
+        .btn {
+            padding: 0.75rem 1.25rem;
+            border: none;
+            border-radius: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .btn-mic {
+            background: var(--accent);
+            color: white;
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            justify-content: center;
+            font-size: 1.5rem;
+        }
+
+        .btn-mic.recording {
+            background: #ff0040;
+            animation: pulse 0.5s infinite;
+        }
+
+        .btn-send {
+            background: var(--accent-warm);
+            color: var(--bg-primary);
+        }
+
+        .btn:hover { transform: scale(1.05); }
+        .btn:active { transform: scale(0.95); }
+
+        .agent-thinking {
+            color: var(--text-muted);
+            font-style: italic;
+            padding: 0.5rem 1rem;
+        }
+
+        .agent-thinking::after {
+            content: '...';
+            animation: dots 1.5s infinite;
+        }
+
+        @keyframes dots {
+            0% { content: '.'; }
+            33% { content: '..'; }
+            66% { content: '...'; }
+        }
+
+        .quick-actions {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            padding: 0 1rem;
+        }
+
+        .quick-btn {
+            padding: 0.5rem 1rem;
+            border: 1px solid var(--bg-card);
+            border-radius: 20px;
+            background: transparent;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: all 0.2s;
+        }
+
+        .quick-btn:hover {
+            background: var(--bg-card);
+            color: var(--text-primary);
+            border-color: var(--accent-warm);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo">🌍 HadithiAI Live</div>
+        <div class="status">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">Connecting...</span>
+        </div>
+    </header>
+
+    <div class="main">
+        <div class="conversation" id="conversation">
+            <!-- Messages will be added here -->
+        </div>
+
+        <div class="quick-actions" id="quickActions">
+            <button class="quick-btn" onclick="sendQuick('Tell me a Yoruba trickster story')">🦎 Yoruba Story</button>
+            <button class="quick-btn" onclick="sendQuick('Give me a Swahili riddle')">🧩 Swahili Riddle</button>
+            <button class="quick-btn" onclick="sendQuick('Tell me a Zulu creation story')">🌅 Zulu Creation</button>
+            <button class="quick-btn" onclick="sendQuick('Share an Ashanti Anansi tale')">🕷️ Anansi Tale</button>
+            <button class="quick-btn" onclick="sendQuick('Teach me an African proverb')">📜 Proverb</button>
+        </div>
+
+        <div class="controls">
+            <button class="btn btn-mic" id="micBtn" onclick="toggleMic()">🎤</button>
+            <input type="text" class="text-input" id="textInput"
+                   placeholder="Ask HadithiAI anything about African stories..."
+                   onkeydown="if(event.key==='Enter') sendText()">
+            <button class="btn btn-send" onclick="sendText()">Send ▶</button>
+        </div>
+    </div>
+
+    <script>
+        // ─── State ──────────────────────────────────
+        let ws = null;
+        let sessionId = null;
+        let isRecording = false;
+        let mediaRecorder = null;
+        let audioContext = null;
+        let currentAgentMessage = null;
+        let seqCounter = 0;
+
+        // ─── WebSocket Connection ───────────────────
+        function connect() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${location.host}/ws`;
+            
+            ws = new WebSocket(wsUrl);
+            ws.onopen = onOpen;
+            ws.onmessage = onMessage;
+            ws.onclose = onClose;
+            ws.onerror = onError;
+        }
+
+        function onOpen() {
+            setStatus('connected', 'Connected');
+            console.log('WebSocket connected');
+        }
+
+        function onMessage(event) {
+            const msg = JSON.parse(event.data);
+            
+            switch (msg.type) {
+                case 'session_created':
+                    sessionId = msg.session_id;
+                    console.log('Session:', sessionId);
+                    addAgentMessage('🌍 *Karibu!* Welcome to HadithiAI Live.\n\nI am your Griot — a keeper of stories from across Africa. Ask me for a story, a riddle, or anything about African oral traditions!');
+                    break;
+
+                case 'text_chunk':
+                    appendToAgentMessage(msg.data, msg.agent);
+                    setStatus('streaming', `${msg.agent || 'HadithiAI'} speaking...`);
+                    break;
+
+                case 'audio_chunk':
+                    playAudioChunk(msg.data);
+                    break;
+
+                case 'image_ready':
+                    appendImageToConversation(msg.url);
+                    break;
+
+                case 'agent_state':
+                    showAgentState(msg.agent, msg.state);
+                    break;
+
+                case 'turn_end':
+                    finalizeAgentMessage();
+                    setStatus('connected', 'Connected');
+                    break;
+
+                case 'error':
+                    addAgentMessage(`⚠️ ${msg.error}`);
+                    setStatus('error', 'Error');
+                    break;
+
+                case 'pong':
+                    break; // Keepalive response
+            }
+        }
+
+        function onClose() {
+            setStatus('error', 'Disconnected');
+            // Auto-reconnect after 3 seconds
+            setTimeout(connect, 3000);
+        }
+
+        function onError(err) {
+            console.error('WebSocket error:', err);
+            setStatus('error', 'Connection error');
+        }
+
+        // ─── Send Messages ─────────────────────────
+        function sendText() {
+            const input = document.getElementById('textInput');
+            const text = input.value.trim();
+            if (!text || !ws) return;
+
+            ws.send(JSON.stringify({
+                type: 'text_input',
+                data: text,
+                seq: ++seqCounter
+            }));
+
+            addUserMessage(text);
+            input.value = '';
+        }
+
+        function sendQuick(text) {
+            document.getElementById('textInput').value = text;
+            sendText();
+        }
+
+        function sendInterrupt() {
+            if (ws) {
+                ws.send(JSON.stringify({
+                    type: 'interrupt',
+                    seq: ++seqCounter
+                }));
+            }
+        }
+
+        // ─── Microphone ────────────────────────────
+        async function toggleMic() {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                await startRecording();
+            }
+        }
+
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                    }
+                });
+
+                audioContext = new AudioContext({ sampleRate: 16000 });
+                const source = audioContext.createMediaStreamSource(stream);
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                processor.onaudioprocess = (e) => {
+                    if (!isRecording || !ws) return;
+                    const pcmData = e.inputBuffer.getChannelData(0);
+                    const int16 = new Int16Array(pcmData.length);
+                    for (let i = 0; i < pcmData.length; i++) {
+                        int16[i] = Math.max(-32768, Math.min(32767, pcmData[i] * 32768));
+                    }
+                    const base64 = btoa(String.fromCharCode(...new Uint8Array(int16.buffer)));
+                    ws.send(JSON.stringify({
+                        type: 'audio_chunk',
+                        data: base64,
+                        seq: ++seqCounter
+                    }));
+                };
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                isRecording = true;
+                document.getElementById('micBtn').classList.add('recording');
+                setStatus('streaming', 'Listening...');
+
+            } catch (err) {
+                console.error('Microphone error:', err);
+                alert('Could not access microphone. Please allow microphone access.');
+            }
+        }
+
+        function stopRecording() {
+            isRecording = false;
+            document.getElementById('micBtn').classList.remove('recording');
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            setStatus('connected', 'Connected');
+        }
+
+        // ─── Audio Playback ────────────────────────
+        const audioQueue = [];
+        let isPlaying = false;
+
+        function playAudioChunk(base64Data) {
+            audioQueue.push(base64Data);
+            if (!isPlaying) processAudioQueue();
+        }
+
+        async function processAudioQueue() {
+            if (audioQueue.length === 0) {
+                isPlaying = false;
+                return;
+            }
+            isPlaying = true;
+            const data = audioQueue.shift();
+            
+            try {
+                const ctx = new AudioContext({ sampleRate: 24000 });
+                const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
+                const int16 = new Int16Array(bytes.buffer);
+                const float32 = new Float32Array(int16.length);
+                for (let i = 0; i < int16.length; i++) {
+                    float32[i] = int16[i] / 32768;
+                }
+                const buffer = ctx.createBuffer(1, float32.length, 24000);
+                buffer.getChannelData(0).set(float32);
+                const source = ctx.createBufferSource();
+                source.buffer = buffer;
+                source.connect(ctx.destination);
+                source.onended = () => processAudioQueue();
+                source.start();
+            } catch (err) {
+                console.error('Audio playback error:', err);
+                processAudioQueue();
+            }
+        }
+
+        // ─── UI Helpers ────────────────────────────
+        function setStatus(state, text) {
+            const dot = document.getElementById('statusDot');
+            const label = document.getElementById('statusText');
+            dot.className = `status-dot ${state}`;
+            label.textContent = text;
+        }
+
+        function addUserMessage(text) {
+            const conv = document.getElementById('conversation');
+            const div = document.createElement('div');
+            div.className = 'message user';
+            div.textContent = text;
+            conv.appendChild(div);
+            conv.scrollTop = conv.scrollHeight;
+        }
+
+        function addAgentMessage(text) {
+            const conv = document.getElementById('conversation');
+            const div = document.createElement('div');
+            div.className = 'message agent';
+            div.innerHTML = `<div class="agent-label">🌍 HadithiAI</div>${formatText(text)}`;
+            conv.appendChild(div);
+            conv.scrollTop = conv.scrollHeight;
+            currentAgentMessage = null;
+        }
+
+        function appendToAgentMessage(text, agent) {
+            if (!currentAgentMessage) {
+                const conv = document.getElementById('conversation');
+                const div = document.createElement('div');
+                div.className = 'message agent';
+                const label = agent === 'story' ? '📖 Story' :
+                              agent === 'riddle' ? '🧩 Riddle' :
+                              agent === 'cultural' ? '🌍 Culture' : '🌍 HadithiAI';
+                div.innerHTML = `<div class="agent-label">${label}</div><span class="content"></span>`;
+                conv.appendChild(div);
+                currentAgentMessage = div.querySelector('.content');
+            }
+            currentAgentMessage.textContent += text;
+            const conv = document.getElementById('conversation');
+            conv.scrollTop = conv.scrollHeight;
+        }
+
+        function finalizeAgentMessage() {
+            currentAgentMessage = null;
+        }
+
+        function appendImageToConversation(url) {
+            const conv = document.getElementById('conversation');
+            const div = document.createElement('div');
+            div.className = 'message agent';
+            div.innerHTML = `<div class="agent-label">🎨 Scene Illustration</div><img src="${url}" alt="Story scene" loading="lazy">`;
+            conv.appendChild(div);
+            conv.scrollTop = conv.scrollHeight;
+        }
+
+        function showAgentState(agent, state) {
+            // Could show thinking indicators
+            console.log(`Agent ${agent}: ${state}`);
+        }
+
+        function formatText(text) {
+            return text
+                .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+                .replace(/\n/g, '<br>');
+        }
+
+        // ─── Initialize ────────────────────────────
+        connect();
+    </script>
+</body>
+</html>
