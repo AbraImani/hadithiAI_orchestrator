@@ -8,11 +8,16 @@ WebSocket support, configures middleware, and starts the server.
 import os
 import logging
 import uvicorn
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+
+# Resolve paths relative to the project root (parent of src/)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_STATIC_DIR = _PROJECT_ROOT / "static"
 
 from gateway.websocket_handler import router as ws_router
 from gateway.health import router as health_router
@@ -71,7 +76,8 @@ app.include_router(health_router, tags=["Health"])
 app.include_router(ws_router, tags=["WebSocket"])
 
 # ── Static files (web client) ──
-app.mount("/static", StaticFiles(directory="static"), name="static")
+if _STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
 if __name__ == "__main__":

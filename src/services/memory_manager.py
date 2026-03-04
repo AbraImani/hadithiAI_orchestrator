@@ -134,6 +134,10 @@ class MemoryManager:
 
         return "\n".join(parts) if parts else "New conversation, no history yet."
 
+    async def get_preferences(self) -> dict:
+        """Get current user preferences."""
+        return dict(self._preferences)
+
     async def update_preferences(self, updates: dict):
         """Update user preferences (language, age group, etc.)."""
         self._preferences.update(updates)

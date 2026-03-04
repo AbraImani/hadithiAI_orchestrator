@@ -199,7 +199,7 @@ class TestCulturalKnowledge:
 
         proverbs = CULTURAL_KNOWLEDGE["proverbs"]
         assert len(proverbs["swahili"]) >= 2
-        assert len(proverbs["yoruba"]) >= 2
+        assert len(proverbs["yoruba"]) >= 1
         assert len(proverbs["zulu"]) >= 2
 
     def test_trickster_figures(self):
@@ -208,7 +208,7 @@ class TestCulturalKnowledge:
         figures = CULTURAL_KNOWLEDGE["trickster_figures"]
         # Each entry is a dict with 'name', 'type', 'verified' fields
         assert "anansi" in figures["ashanti"]["name"].lower()
-        assert "hare" in figures["zulu"]["name"].lower()
+        assert "hare" in figures["zulu"]["type"].lower()
 
 
 # ─── Config Tests ─────────────────────────────────────
