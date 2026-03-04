@@ -114,6 +114,15 @@ async def websocket_endpoint(websocket: WebSocket):
             extra={"session_id": session_id, "event": "ws_error"},
             exc_info=True,
         )
+        # Notify client before disconnecting
+        try:
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.send_json({
+                    "type": "error",
+                    "error": f"Server initialization failed: {e}",
+                })
+        except Exception:
+            pass
     finally:
         # ── Cleanup ──
         await _cleanup(conn)

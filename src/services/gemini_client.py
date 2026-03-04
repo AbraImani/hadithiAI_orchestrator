@@ -54,12 +54,18 @@ class GeminiLiveSession:
             from google import genai
             from google.genai import types
 
-            # Create client
-            client = genai.Client(
-                vertexai=True,
-                project=project_id,
-                location=region,
-            )
+            # Support both API key and Vertex AI authentication
+            api_key = settings.GEMINI_API_KEY
+            if api_key:
+                client = genai.Client(api_key=api_key)
+                self._logger.info("Using API key authentication")
+            else:
+                client = genai.Client(
+                    vertexai=True,
+                    project=project_id,
+                    location=region,
+                )
+                self._logger.info("Using Vertex AI (ADC) authentication")
 
             # Configure Live API session
             config = types.LiveConnectConfig(
@@ -79,9 +85,9 @@ class GeminiLiveSession:
                 ),
             )
 
-            # Connect to Live API
+            # Connect to Live API (SDK handles model path internally)
             self._session = client.aio.live.connect(
-                model=f"models/{model}",
+                model=model,
                 config=config,
             )
             self._live = await self._session.__aenter__()
@@ -99,65 +105,108 @@ class GeminiLiveSession:
     async def _listen(self):
         """
         Background listener for Gemini Live API events.
-        
-        Translates raw API events into our internal event format
-        and puts them on the event queue.
+
+        Parses LiveServerMessage responses and normalises them into
+        simple dicts on the event queue.  Handles both the raw
+        server_content/tool_call structure and convenience properties
+        (.text, .data) that newer SDK versions expose.
         """
+        import base64
         try:
             while self._is_connected:
                 try:
                     async for response in self._live.receive():
-                        # Handle different response types
-                        if hasattr(response, 'text') and response.text:
-                            await self._event_queue.put({
-                                "type": "text",
-                                "data": response.text,
-                            })
+                        await self._process_live_response(response, base64)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    if self._is_connected:
+                        self._logger.error(
+                            f"Gemini Live receive error: {e}", exc_info=True
+                        )
+                        await self._event_queue.put({
+                            "type": "error",
+                            "message": str(e),
+                        })
+                        # Brief pause before retrying the receive loop
+                        await asyncio.sleep(0.5)
+                    else:
+                        break
+        except asyncio.CancelledError:
+            pass
 
-                        if hasattr(response, 'data') and response.data:
-                            # Audio data (bytes)
-                            import base64
-                            audio_b64 = base64.b64encode(response.data).decode()
+    async def _process_live_response(self, response, base64):
+        """
+        Parse a single LiveServerMessage into internal events.
+
+        Priority order:
+        1. server_content.model_turn.parts  (text and audio parts)
+        2. server_content.turn_complete / interrupted  (turn signals)
+        3. tool_call.function_calls  (function invocations)
+        4. Convenience .text / .data  (fallback for newer SDK)
+        """
+        handled_text = False
+        handled_audio = False
+
+        # -- 1. Raw server_content (works on all SDK versions) --
+        sc = getattr(response, 'server_content', None)
+        if sc is not None:
+            model_turn = getattr(sc, 'model_turn', None)
+            if model_turn:
+                for part in (getattr(model_turn, 'parts', None) or []):
+                    # Text part
+                    text_val = getattr(part, 'text', None)
+                    if text_val:
+                        handled_text = True
+                        await self._event_queue.put({
+                            "type": "text",
+                            "data": text_val,
+                        })
+                    # Inline audio data
+                    inline = getattr(part, 'inline_data', None)
+                    if inline:
+                        raw = getattr(inline, 'data', None)
+                        if raw:
+                            handled_audio = True
+                            audio_b64 = base64.b64encode(raw).decode()
                             await self._event_queue.put({
                                 "type": "audio",
                                 "data": audio_b64,
                             })
 
-                        # Function calls
-                        if hasattr(response, 'tool_call') and response.tool_call:
-                            for fc in response.tool_call.function_calls:
-                                await self._event_queue.put({
-                                    "type": "function_call",
-                                    "id": fc.id,
-                                    "name": fc.name,
-                                    "args": dict(fc.args) if fc.args else {},
-                                })
+            # Turn-level signals
+            if getattr(sc, 'turn_complete', False):
+                await self._event_queue.put({"type": "turn_complete"})
+            if getattr(sc, 'interrupted', False):
+                await self._event_queue.put({"type": "interrupted"})
 
-                        # Turn complete
-                        if hasattr(response, 'server_content') and response.server_content:
-                            if response.server_content.turn_complete:
-                                await self._event_queue.put({
-                                    "type": "turn_complete",
-                                })
+        # -- 2. Convenience properties (newer SDK only) --
+        if not handled_text:
+            text_val = getattr(response, 'text', None)
+            if text_val:
+                await self._event_queue.put({
+                    "type": "text",
+                    "data": text_val,
+                })
+        if not handled_audio:
+            data_val = getattr(response, 'data', None)
+            if data_val and isinstance(data_val, (bytes, bytearray)):
+                audio_b64 = base64.b64encode(data_val).decode()
+                await self._event_queue.put({
+                    "type": "audio",
+                    "data": audio_b64,
+                })
 
-                        # Interrupted
-                        if hasattr(response, 'server_content') and response.server_content:
-                            if response.server_content.interrupted:
-                                await self._event_queue.put({
-                                    "type": "interrupted",
-                                })
-
-                except Exception as e:
-                    if self._is_connected:
-                        self._logger.error(f"Gemini Live receive error: {e}")
-                        await self._event_queue.put({
-                            "type": "error",
-                            "message": str(e),
-                        })
-                    break
-
-        except asyncio.CancelledError:
-            pass
+        # -- 3. Function (tool) calls --
+        tc = getattr(response, 'tool_call', None)
+        if tc:
+            for fc in (getattr(tc, 'function_calls', None) or []):
+                await self._event_queue.put({
+                    "type": "function_call",
+                    "id": getattr(fc, 'id', ''),
+                    "name": getattr(fc, 'name', ''),
+                    "args": dict(fc.args) if getattr(fc, 'args', None) else {},
+                })
 
     async def receive_events(self) -> AsyncIterator[dict]:
         """Yield events from the Gemini Live session."""
@@ -291,12 +340,17 @@ class GeminiClientPool:
         try:
             from google import genai
 
-            self._text_client = genai.Client(
-                vertexai=True,
-                project=self.project_id,
-                location=self.region,
-            )
-            self._logger.info("Gemini text client initialized")
+            api_key = settings.GEMINI_API_KEY
+            if api_key:
+                self._text_client = genai.Client(api_key=api_key)
+                self._logger.info("Gemini text client initialized (API key)")
+            else:
+                self._text_client = genai.Client(
+                    vertexai=True,
+                    project=self.project_id,
+                    location=self.region,
+                )
+                self._logger.info("Gemini text client initialized (Vertex AI)")
         except Exception as e:
             self._logger.warning(f"Gemini warm-up failed (will retry on demand): {e}")
 
@@ -342,14 +396,18 @@ class GeminiClientPool:
             from google.genai import types
 
             if not self._text_client:
-                self._text_client = genai.Client(
-                    vertexai=True,
-                    project=self.project_id,
-                    location=self.region,
-                )
+                api_key = settings.GEMINI_API_KEY
+                if api_key:
+                    self._text_client = genai.Client(api_key=api_key)
+                else:
+                    self._text_client = genai.Client(
+                        vertexai=True,
+                        project=self.project_id,
+                        location=self.region,
+                    )
 
             response = self._text_client.aio.models.generate_content_stream(
-                model=f"models/{settings.GEMINI_TEXT_MODEL}",
+                model=settings.GEMINI_TEXT_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,

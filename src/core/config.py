@@ -5,16 +5,20 @@ Central configuration using Pydantic settings.
 Loads from environment variables with sensible defaults.
 """
 
+from pathlib import Path
 from pydantic_settings import BaseSettings
 from pydantic import ConfigDict
 from typing import Optional
+
+# Resolve .env at project root (two levels up from src/core/)
+_ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     model_config = ConfigDict(
-        env_file=".env",
+        env_file=str(_ENV_FILE),
         env_prefix="HADITHI_",
         case_sensitive=True,
     )
