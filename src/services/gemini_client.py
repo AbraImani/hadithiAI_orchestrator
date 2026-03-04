@@ -69,20 +69,13 @@ class GeminiLiveSession:
 
             # Configure Live API session
             config = types.LiveConnectConfig(
-                response_modalities=["AUDIO", "TEXT"],
+                response_modalities=["AUDIO"],
                 system_instruction=types.Content(
                     parts=[types.Part(text=system_instruction)]
                 ),
                 tools=[types.Tool(function_declarations=[
                     types.FunctionDeclaration(**tool) for tool in tools
                 ])],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            voice_name="Aoede"  # Warm, storytelling voice
-                        )
-                    )
-                ),
             )
 
             # Connect to Live API (SDK handles model path internally)

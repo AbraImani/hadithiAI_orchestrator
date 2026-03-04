@@ -221,7 +221,7 @@ class TestConfig:
         from core.config import Settings
         
         s = Settings()
-        assert s.GEMINI_MODEL == "gemini-2.0-flash-live"
+        assert s.GEMINI_MODEL == "gemini-2.5-flash-native-audio-latest"
         assert s.AUDIO_SAMPLE_RATE_INPUT == 16000
         assert s.AUDIO_SAMPLE_RATE_OUTPUT == 24000
         assert s.STREAM_BUFFER_HIGH_WATERMARK == 50

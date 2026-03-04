@@ -74,7 +74,7 @@ on keywords. HadithiAI Live is fundamentally different:
 | Layer | Technology | Rationale |
 |---|---|---|
 | Agent Framework | Google ADK (Python) | Native Gemini integration, agent hierarchy, tool use |
-| A2A Protocol | google-a2a | Typed inter-agent communication, schema enforcement |
+| A2A Protocol | python-a2a + custom router | Typed inter-agent communication, schema enforcement |
 | AI Engine | Gemini 2.0 Flash Live API | Bidirectional streaming, function calling, native TTS |
 | Sub-Agent LLM | Gemini 2.0 Flash (text) | Fast text generation for specialized agents |
 | Image Generation | Imagen 3 via Vertex AI | High-quality culturally appropriate imagery |
@@ -358,7 +358,7 @@ from google.adk.sessions import InMemorySessionService
 # -- Root Orchestrator Agent --
 root_agent = Agent(
     name="hadithiai_orchestrator",
-    model="gemini-2.0-flash-live",
+    model="gemini-2.5-flash-native-audio-latest",
     instruction=ORCHESTRATOR_SYSTEM_PROMPT,
     tools=[
         FunctionTool(tell_story),
@@ -938,7 +938,7 @@ config = types.LiveConnectConfig(
 )
 
 async with client.aio.live.connect(
-    model="models/gemini-2.0-flash-live",
+    model="gemini-2.5-flash-native-audio-latest",
     config=config,
 ) as session:
     # session is now a persistent bidirectional stream
@@ -1417,7 +1417,7 @@ arrives.
 async def on_client_connect(ws):
     # Open Gemini Live session immediately (do not wait for first message)
     gemini_session = await open_gemini_live_session(
-        model="gemini-2.0-flash-live",
+        model="gemini-2.5-flash-native-audio-latest",
         system_instruction=SYSTEM_PROMPT,
         tools=AGENT_TOOLS,
     )

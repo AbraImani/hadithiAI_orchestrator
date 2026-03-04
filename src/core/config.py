@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     REGION: str = "us-central1"
     
     # ── Gemini ──
-    GEMINI_MODEL: str = "gemini-2.0-flash-live"
+    GEMINI_MODEL: str = "gemini-2.5-flash-native-audio-latest"
     GEMINI_TEXT_MODEL: str = "gemini-2.0-flash"
     GEMINI_POOL_SIZE: int = 3
     GEMINI_API_KEY: Optional[str] = None  # If using API key auth instead of ADC
