@@ -1,17 +1,28 @@
 """
 Gemini Client & Session Pool
 =============================
-Manages connections to Gemini 2.0 Flash Live API and text generation.
-Implements connection pooling for warm sessions and streaming helpers.
+Manages connections to the Gemini Live API (bidiGenerateContent)
+and Gemini text generation API for sub-agent calls.
 
-Two modes of interaction:
-1. Gemini Live (WebSocket) — for the Orchestrator's bidirectional audio/text
-2. Gemini Text (REST) — for sub-agent text generation (streaming)
+Architecture:
+  - GeminiLiveSession: Single persistent WebSocket session to the
+    Gemini Multimodal Live API. Handles bidirectional audio/text/video
+    streaming with function calling.
+  - GeminiClientPool: Manages Live sessions + text generation client.
+    Each WebSocket connection gets its own Live session (stateful).
+
+Key integration patterns (per Google AI Studio reference):
+  - Uses api_version="v1beta" via http_options
+  - Configures context_window_compression for long conversations
+  - Sets speech_config with voice selection
+  - Handles interruptions via audio queue drain
+  - Uses media_resolution for video frames
 """
 
 import asyncio
+import base64
 import logging
-import json
+import uuid
 from typing import AsyncIterator, Optional
 
 from core.config import settings
@@ -21,21 +32,30 @@ logger = logging.getLogger(__name__)
 
 class GeminiLiveSession:
     """
-    Represents a single persistent Gemini Live API WebSocket session.
-    
-    The Gemini Live API (Multimodal Live API) provides bidirectional
-    streaming over WebSocket:
-    - Send: audio chunks (PCM 16kHz), text, function responses
-    - Receive: audio chunks (PCM 24kHz), text, function calls, events
+    Persistent Gemini Live API (bidiGenerateContent) WebSocket session.
+
+    Bidirectional streaming:
+      Send: audio chunks (PCM 16kHz), text, video frames, function responses
+      Receive: audio chunks (PCM 24kHz), text, function calls, turn signals
+
+    Follows the patterns from the Google AI Studio reference:
+      - context_window_compression with sliding_window for long sessions
+      - speech_config with configurable voice
+      - Interruption handling via queue drain
     """
 
     def __init__(self, session_id: str):
         self.session_id = session_id
-        self._ws = None
+        self._session = None
+        self._live = None
         self._event_queue: asyncio.Queue = asyncio.Queue()
         self._listener_task: Optional[asyncio.Task] = None
         self._is_connected = False
-        self._logger = logger.getChild(f"gemini_live.{session_id[:8]}")
+        self._logger = logger.getChild(f"live.{session_id[:8]}")
+
+    @property
+    def is_connected(self) -> bool:
+        return self._is_connected
 
     async def connect(
         self,
@@ -47,38 +67,75 @@ class GeminiLiveSession:
     ):
         """
         Open a Gemini Live API WebSocket session.
-        
-        Uses the google-genai SDK for Gemini Live API.
+
+        Configures:
+          - response_modalities=["AUDIO"] (native audio model)
+          - context_window_compression (sliding window for long chats)
+          - speech_config with voice selection
+          - http_options with api_version="v1beta"
         """
         try:
             from google import genai
             from google.genai import types
 
-            # Support both API key and Vertex AI authentication
+            # -- Authentication --
             api_key = settings.GEMINI_API_KEY
             if api_key:
-                client = genai.Client(api_key=api_key)
-                self._logger.info("Using API key authentication")
+                client = genai.Client(
+                    api_key=api_key,
+                    http_options={"api_version": "v1beta"},
+                )
+                self._logger.info("Auth: API key + v1beta")
             else:
                 client = genai.Client(
                     vertexai=True,
                     project=project_id,
                     location=region,
+                    http_options={"api_version": "v1beta"},
                 )
-                self._logger.info("Using Vertex AI (ADC) authentication")
+                self._logger.info("Auth: Vertex AI ADC + v1beta")
 
-            # Configure Live API session
-            config = types.LiveConnectConfig(
-                response_modalities=["AUDIO"],
-                system_instruction=types.Content(
+            # -- Build LiveConnectConfig --
+            config_kwargs = {
+                "response_modalities": ["AUDIO"],
+                "system_instruction": types.Content(
                     parts=[types.Part(text=system_instruction)]
                 ),
-                tools=[types.Tool(function_declarations=[
+                "tools": [types.Tool(function_declarations=[
                     types.FunctionDeclaration(**tool) for tool in tools
                 ])],
-            )
+            }
 
-            # Connect to Live API (SDK handles model path internally)
+            # Context window compression (prevents crash on long sessions)
+            try:
+                config_kwargs["context_window_compression"] = (
+                    types.ContextWindowCompressionConfig(
+                        sliding_window=types.SlidingWindow(
+                            target_tokens=100000,
+                        ),
+                    )
+                )
+            except (AttributeError, TypeError):
+                self._logger.debug(
+                    "SDK does not support context_window_compression, skipping"
+                )
+
+            # Speech config with voice (may not be supported on all models)
+            try:
+                voice_name = getattr(settings, "GEMINI_VOICE", "Zephyr")
+                config_kwargs["speech_config"] = types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name=voice_name,
+                        )
+                    )
+                )
+            except (AttributeError, TypeError):
+                self._logger.debug("SDK does not support speech_config, skipping")
+
+            config = types.LiveConnectConfig(**config_kwargs)
+
+            # -- Connect --
             self._session = client.aio.live.connect(
                 model=model,
                 config=config,
@@ -87,139 +144,152 @@ class GeminiLiveSession:
             self._is_connected = True
 
             # Start background listener
-            self._listener_task = asyncio.create_task(self._listen())
+            self._listener_task = asyncio.create_task(
+                self._listen(),
+                name=f"gemini-rx-{self.session_id[:8]}",
+            )
 
-            self._logger.info("Gemini Live session connected")
+            self._logger.info(
+                "Live session connected",
+                extra={"model": model},
+            )
 
         except Exception as e:
-            self._logger.error(f"Failed to connect Gemini Live: {e}", exc_info=True)
+            self._logger.error(f"Connect failed: {e}", exc_info=True)
             raise
 
     async def _listen(self):
         """
-        Background listener for Gemini Live API events.
+        Background listener for Gemini Live API server messages.
 
-        Parses LiveServerMessage responses and normalises them into
-        simple dicts on the event queue.  Handles both the raw
-        server_content/tool_call structure and convenience properties
-        (.text, .data) that newer SDK versions expose.
+        Normalises LiveServerMessage into simple dicts on the event queue:
+          {"type": "text"|"audio"|"function_call"|"turn_complete"|"interrupted"|"error", ...}
+
+        Handles both raw server_content and SDK convenience properties (.text, .data).
+        On connection loss: puts a terminal error event and exits.
         """
-        import base64
         try:
             while self._is_connected:
                 try:
                     async for response in self._live.receive():
-                        await self._process_live_response(response, base64)
+                        await self._process_response(response)
                 except asyncio.CancelledError:
+                    break
+                except StopAsyncIteration:
+                    # Server closed the stream gracefully
+                    self._logger.info("Live stream ended (server closed)")
+                    await self._event_queue.put({
+                        "type": "error",
+                        "message": "Gemini session ended by server",
+                        "fatal": True,
+                    })
                     break
                 except Exception as e:
                     if self._is_connected:
                         self._logger.error(
-                            f"Gemini Live receive error: {e}", exc_info=True
+                            f"Receive error: {e}", exc_info=True
                         )
                         await self._event_queue.put({
                             "type": "error",
                             "message": str(e),
                         })
-                        # Brief pause before retrying the receive loop
                         await asyncio.sleep(0.5)
                     else:
                         break
         except asyncio.CancelledError:
             pass
+        finally:
+            self._is_connected = False
 
-    async def _process_live_response(self, response, base64):
+    async def _process_response(self, response):
         """
-        Parse a single LiveServerMessage into internal events.
+        Parse a single LiveServerMessage into queued events.
 
-        Priority order:
-        1. server_content.model_turn.parts  (text and audio parts)
-        2. server_content.turn_complete / interrupted  (turn signals)
-        3. tool_call.function_calls  (function invocations)
-        4. Convenience .text / .data  (fallback for newer SDK)
+        Order:
+          1. server_content.model_turn.parts (text + inline audio)
+          2. server_content.turn_complete / interrupted
+          3. tool_call.function_calls
+          4. Fallback: convenience .text / .data
         """
         handled_text = False
         handled_audio = False
 
-        # -- 1. Raw server_content (works on all SDK versions) --
-        sc = getattr(response, 'server_content', None)
+        # -- 1. server_content --
+        sc = getattr(response, "server_content", None)
         if sc is not None:
-            model_turn = getattr(sc, 'model_turn', None)
+            model_turn = getattr(sc, "model_turn", None)
             if model_turn:
-                for part in (getattr(model_turn, 'parts', None) or []):
-                    # Text part
-                    text_val = getattr(part, 'text', None)
+                for part in getattr(model_turn, "parts", None) or []:
+                    # Text
+                    text_val = getattr(part, "text", None)
                     if text_val:
                         handled_text = True
                         await self._event_queue.put({
                             "type": "text",
                             "data": text_val,
                         })
-                    # Inline audio data
-                    inline = getattr(part, 'inline_data', None)
+                    # Inline audio
+                    inline = getattr(part, "inline_data", None)
                     if inline:
-                        raw = getattr(inline, 'data', None)
+                        raw = getattr(inline, "data", None)
                         if raw:
                             handled_audio = True
-                            audio_b64 = base64.b64encode(raw).decode()
                             await self._event_queue.put({
                                 "type": "audio",
-                                "data": audio_b64,
+                                "data": base64.b64encode(raw).decode(),
                             })
 
-            # Turn-level signals
-            if getattr(sc, 'turn_complete', False):
+            if getattr(sc, "turn_complete", False):
                 await self._event_queue.put({"type": "turn_complete"})
-            if getattr(sc, 'interrupted', False):
+            if getattr(sc, "interrupted", False):
                 await self._event_queue.put({"type": "interrupted"})
 
-        # -- 2. Convenience properties (newer SDK only) --
+        # -- 2. Convenience properties (newer SDK) --
         if not handled_text:
-            text_val = getattr(response, 'text', None)
+            text_val = getattr(response, "text", None)
             if text_val:
-                await self._event_queue.put({
-                    "type": "text",
-                    "data": text_val,
-                })
+                await self._event_queue.put({"type": "text", "data": text_val})
+
         if not handled_audio:
-            data_val = getattr(response, 'data', None)
+            data_val = getattr(response, "data", None)
             if data_val and isinstance(data_val, (bytes, bytearray)):
-                audio_b64 = base64.b64encode(data_val).decode()
                 await self._event_queue.put({
                     "type": "audio",
-                    "data": audio_b64,
+                    "data": base64.b64encode(data_val).decode(),
                 })
 
         # -- 3. Function (tool) calls --
-        tc = getattr(response, 'tool_call', None)
+        tc = getattr(response, "tool_call", None)
         if tc:
-            for fc in (getattr(tc, 'function_calls', None) or []):
+            for fc in getattr(tc, "function_calls", None) or []:
                 await self._event_queue.put({
                     "type": "function_call",
-                    "id": getattr(fc, 'id', ''),
-                    "name": getattr(fc, 'name', ''),
-                    "args": dict(fc.args) if getattr(fc, 'args', None) else {},
+                    "id": getattr(fc, "id", ""),
+                    "name": getattr(fc, "name", ""),
+                    "args": dict(fc.args) if getattr(fc, "args", None) else {},
                 })
 
     async def receive_events(self) -> AsyncIterator[dict]:
-        """Yield events from the Gemini Live session."""
-        while self._is_connected:
+        """Yield events from the Live session event queue."""
+        while self._is_connected or not self._event_queue.empty():
             try:
                 event = await asyncio.wait_for(
                     self._event_queue.get(), timeout=60.0
                 )
                 yield event
+                # If fatal error, stop iterating
+                if event.get("type") == "error" and event.get("fatal"):
+                    break
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
 
     async def send_audio(self, audio_b64: str):
-        """Send an audio chunk to Gemini Live."""
+        """Send a PCM 16kHz audio chunk to the Live session."""
         if not self._is_connected:
             return
         try:
-            import base64
             from google.genai import types
 
             audio_bytes = base64.b64decode(audio_b64)
@@ -232,29 +302,27 @@ class GeminiLiveSession:
                 )
             )
         except Exception as e:
-            self._logger.error(f"Failed to send audio: {e}")
+            self._logger.error(f"send_audio failed: {e}")
 
     async def send_text(self, text: str):
-        """Send text input to Gemini Live."""
+        """Send text input with end_of_turn=True."""
         if not self._is_connected:
             return
         try:
             await self._live.send(input=text, end_of_turn=True)
         except Exception as e:
-            self._logger.error(f"Failed to send text: {e}")
+            self._logger.error(f"send_text failed: {e}")
 
-    async def send_video_frame(self, frame_b64: str, width: int = 640, height: int = 480):
+    async def send_video_frame(
+        self, frame_b64: str, width: int = 640, height: int = 480
+    ):
         """
-        Send a video frame to Gemini Live for vision understanding.
-
-        The frame is base64-encoded JPEG or PNG. The Gemini Live API
-        accepts inline image data as part of realtime input so the model
-        can see what the user is showing (book pages, cultural objects).
+        Send a video frame (JPEG/PNG) to the Live session.
+        The model uses this for vision understanding (book pages, objects, etc.).
         """
         if not self._is_connected:
             return
         try:
-            import base64
             from google.genai import types
 
             frame_bytes = base64.b64decode(frame_b64)
@@ -267,10 +335,12 @@ class GeminiLiveSession:
                 )
             )
         except Exception as e:
-            self._logger.error(f"Failed to send video frame: {e}")
+            self._logger.error(f"send_video_frame failed: {e}")
 
-    async def send_function_response(self, func_id: str, func_name: str, result: str):
-        """Send a function call response back to Gemini Live."""
+    async def send_function_response(
+        self, func_id: str, func_name: str, result: str
+    ):
+        """Send a function call response back to the Live session."""
         if not self._is_connected:
             return
         try:
@@ -286,39 +356,54 @@ class GeminiLiveSession:
                 )
             )
         except Exception as e:
-            self._logger.error(f"Failed to send function response: {e}")
+            self._logger.error(f"send_function_response failed: {e}")
 
-    async def send_interrupt(self):
-        """Signal interruption to Gemini Live."""
-        # The Gemini Live API handles interruption automatically
-        # when new audio input arrives during generation.
-        # This is a placeholder for explicit interrupt if needed.
-        pass
+    def drain_event_queue(self):
+        """
+        Drain all pending events from the queue (interruption pattern).
+        Called when the user interrupts — discard buffered audio/text
+        so the model response starts fresh.
+        """
+        drained = 0
+        while not self._event_queue.empty():
+            try:
+                self._event_queue.get_nowait()
+                drained += 1
+            except asyncio.QueueEmpty:
+                break
+        if drained:
+            self._logger.debug(f"Drained {drained} events on interrupt")
 
     async def close(self):
-        """Close the Gemini Live session."""
+        """Close the Live session and cancel the listener task."""
         self._is_connected = False
+
         if self._listener_task and not self._listener_task.done():
             self._listener_task.cancel()
             try:
                 await self._listener_task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, Exception):
                 pass
+            self._listener_task = None
+
         if self._session:
             try:
                 await self._session.__aexit__(None, None, None)
-            except Exception:
-                pass
-        self._logger.info("Gemini Live session closed")
+            except Exception as e:
+                self._logger.debug(f"Session close error (expected): {e}")
+            self._session = None
+            self._live = None
+
+        self._logger.info("Live session closed")
 
 
 class GeminiClientPool:
     """
     Pool of Gemini client resources.
-    
+
     Manages:
-    - Gemini Live sessions (WebSocket, long-lived)
-    - Gemini text generation (for sub-agents)
+      - Gemini Live sessions (WebSocket, one per connection)
+      - Gemini text generation client (shared, for sub-agents)
     """
 
     def __init__(self, project_id: str, region: str, pool_size: int = 3):
@@ -326,26 +411,26 @@ class GeminiClientPool:
         self.region = region
         self.pool_size = pool_size
         self._text_client = None
-        self._logger = logger.getChild("gemini_pool")
+        self._logger = logger.getChild("pool")
 
     async def warm_up(self):
-        """Pre-initialize clients for faster first request."""
+        """Pre-initialize the text generation client."""
         try:
             from google import genai
 
             api_key = settings.GEMINI_API_KEY
             if api_key:
                 self._text_client = genai.Client(api_key=api_key)
-                self._logger.info("Gemini text client initialized (API key)")
+                self._logger.info("Text client ready (API key)")
             else:
                 self._text_client = genai.Client(
                     vertexai=True,
                     project=self.project_id,
                     location=self.region,
                 )
-                self._logger.info("Gemini text client initialized (Vertex AI)")
+                self._logger.info("Text client ready (Vertex AI)")
         except Exception as e:
-            self._logger.warning(f"Gemini warm-up failed (will retry on demand): {e}")
+            self._logger.warning(f"Warm-up failed (will retry): {e}")
 
     async def acquire(
         self,
@@ -354,12 +439,10 @@ class GeminiClientPool:
     ) -> GeminiLiveSession:
         """
         Create a new Gemini Live session.
-        
-        Each WebSocket connection gets its own Live session
-        because Live sessions are stateful (conversation context).
+
+        Each WebSocket connection gets its own stateful Live session.
         """
-        import uuid
-        session = GeminiLiveSession(str(uuid.uuid4())[:8])
+        session = GeminiLiveSession(uuid.uuid4().hex[:8])
         await session.connect(
             system_instruction=system_instruction,
             tools=tools,
@@ -379,10 +462,8 @@ class GeminiClientPool:
         system_instruction: str,
     ) -> AsyncIterator[str]:
         """
-        Stream text generation from Gemini 2.0 Flash (text mode).
-        
-        Used by sub-agents for non-realtime text generation.
-        This is faster than Live API for pure text tasks.
+        Stream text from Gemini text model (non-Live).
+        Used by sub-agents for text generation tasks.
         """
         try:
             from google import genai
@@ -404,7 +485,7 @@ class GeminiClientPool:
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
-                    temperature=0.8,     # Creative but grounded
+                    temperature=0.8,
                     top_p=0.95,
                     max_output_tokens=2048,
                 ),
@@ -421,4 +502,4 @@ class GeminiClientPool:
     async def close_all(self):
         """Close all clients."""
         self._text_client = None
-        self._logger.info("All Gemini clients closed")
+        self._logger.info("All clients closed")

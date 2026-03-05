@@ -21,6 +21,7 @@ _STATIC_DIR = _PROJECT_ROOT / "static"
 
 from gateway.websocket_handler import router as ws_router
 from gateway.health import router as health_router
+from gateway.rest_api import router as rest_router
 from core.config import settings
 from core.logging_config import setup_logging
 from services.firestore_client import FirestoreClient
@@ -74,6 +75,7 @@ app.add_middleware(
 # ── Routers ──
 app.include_router(health_router, tags=["Health"])
 app.include_router(ws_router, tags=["WebSocket"])
+app.include_router(rest_router)
 
 # ── Static files (web client) ──
 if _STATIC_DIR.is_dir():

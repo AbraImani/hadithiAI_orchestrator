@@ -3,7 +3,15 @@ WebSocket Gateway Handler
 =========================
 Manages WebSocket connections, message routing, backpressure,
 and connection lifecycle. This is the entry point for all
-real-time client communication.
+real-time bidirectional client communication (audio/text/video).
+
+Protocol (Flutter client):
+  1. Client connects to /ws?session_id=<optional>
+  2. Server sends session_created with session_id
+  3. Client streams audio_chunk / text_input / video_frame
+  4. Server streams audio_chunk / text_chunk / image_ready / turn_end
+  5. Client can send interrupt at any time
+  6. Connection persists for entire conversation
 """
 
 import asyncio
@@ -12,7 +20,7 @@ import uuid
 import time
 from typing import Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from starlette.websockets import WebSocketState
 
 from core.models import (
@@ -27,7 +35,7 @@ from orchestrator.primary_orchestrator import PrimaryOrchestrator
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Active connections tracker
+# Active connections tracker (for health/metrics)
 active_connections: dict[str, "ConnectionState"] = {}
 
 
@@ -52,19 +60,23 @@ class ConnectionState:
 
 
 @router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(
+    websocket: WebSocket,
+    session_id: Optional[str] = Query(None),
+):
     """
     Main WebSocket endpoint for HadithiAI Live.
     
     Protocol:
-    1. Client connects
-    2. Server creates session and sends session_created
-    3. Client streams audio/text
+    1. Client connects (optionally passing session_id for resumption)
+    2. Server creates/restores session and sends session_created
+    3. Client streams audio/text/video
     4. Server streams responses (audio/text/images)
     5. Connection persists for entire conversation
     """
     await websocket.accept()
-    session_id = str(uuid.uuid4())[:12]
+    if not session_id:
+        session_id = uuid.uuid4().hex[:12]
     conn = ConnectionState(websocket, session_id)
 
     logger.info(

@@ -175,6 +175,9 @@ class PrimaryOrchestrator:
     4. Function calls → dispatched to specialized sub-agents
     5. Sub-agent results → fed back to Gemini for speech synthesis
     6. Final audio/text streamed to client
+
+    Lifecycle:
+      initialize() → [handle_audio/text/video/interrupt/control] → shutdown()
     """
 
     def __init__(
@@ -194,6 +197,7 @@ class PrimaryOrchestrator:
         self.gemini_session: Optional[GeminiLiveSession] = None
         self.current_turn_id: Optional[str] = None
         self._active_tasks: list[asyncio.Task] = []
+        self._listener_task: Optional[asyncio.Task] = None
 
         # Sub-components
         self.memory = MemoryManager(session_id, firestore)
@@ -215,8 +219,8 @@ class PrimaryOrchestrator:
             tools=TOOL_DECLARATIONS,
         )
 
-        # Start the Gemini response listener
-        asyncio.create_task(
+        # Start the Gemini response listener (tracked!)
+        self._listener_task = asyncio.create_task(
             self._gemini_response_listener(),
             name=f"gemini-listener-{self.session_id}",
         )
@@ -276,7 +280,7 @@ class PrimaryOrchestrator:
             await self.gemini_session.send_text(text)
 
     async def handle_interrupt(self):
-        """Handle user interruption."""
+        """Handle user interruption — drain queues, cancel active work."""
         self._logger.info(
             "User interrupted",
             extra={"event": "interrupt", "turn_id": self.current_turn_id},
@@ -291,11 +295,11 @@ class PrimaryOrchestrator:
                 task.cancel()
         self._active_tasks.clear()
 
-        # Tell Gemini Live to stop current generation
+        # Drain the Gemini event queue (discard buffered audio/text)
         if self.gemini_session:
-            await self.gemini_session.send_interrupt()
+            self.gemini_session.drain_event_queue()
 
-        # Drain output queue
+        # Drain the output queue (discard unsent messages to client)
         while not self.output_queue.empty():
             try:
                 self.output_queue.get_nowait()
@@ -360,6 +364,10 @@ class PrimaryOrchestrator:
                     case "function_call":
                         # Gemini wants to invoke a sub-agent
                         self.state = OrchestratorState.PROCESSING
+                        # Clean up completed tasks
+                        self._active_tasks = [
+                            t for t in self._active_tasks if not t.done()
+                        ]
                         task = asyncio.create_task(
                             self._handle_function_call(event)
                         )
@@ -544,14 +552,25 @@ class PrimaryOrchestrator:
         """Clean shutdown of orchestrator and all sub-components."""
         self._logger.info("Orchestrator shutting down")
 
-        # Cancel active tasks
+        # Cancel the Gemini listener task
+        if self._listener_task and not self._listener_task.done():
+            self._listener_task.cancel()
+            try:
+                await self._listener_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._listener_task = None
+
+        # Cancel active sub-agent tasks
         for task in self._active_tasks:
             if not task.done():
                 task.cancel()
+        self._active_tasks.clear()
 
         # Release Gemini session back to pool
         if self.gemini_session:
             await self.gemini_pool.release(self.gemini_session)
+            self.gemini_session = None
 
         # Final session save
         await self.memory.finalize_session()

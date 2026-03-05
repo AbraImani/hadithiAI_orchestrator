@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     GEMINI_TEXT_MODEL: str = "gemini-2.0-flash"
     GEMINI_POOL_SIZE: int = 3
     GEMINI_API_KEY: Optional[str] = None  # If using API key auth instead of ADC
+    GEMINI_VOICE: str = "Zephyr"  # Voice for Live API speech_config
 
     # ── Vertex AI (Imagen) ──
     IMAGEN_MODEL: str = "imagen-3.0-generate-002"

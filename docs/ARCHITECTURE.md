@@ -1,8 +1,8 @@
-# HadithiAI Live -- Architecture Document
+# HadithiAI Live — Architecture Document
 
 ## The First African Immersive Oral AI Agent
 
-### Production-Grade System Architecture v3.0
+### Production-Grade System Architecture v4.0
 
 ---
 
@@ -75,13 +75,15 @@ on keywords. HadithiAI Live is fundamentally different:
 |---|---|---|
 | Agent Framework | Google ADK (Python) | Native Gemini integration, agent hierarchy, tool use |
 | A2A Protocol | python-a2a + custom router | Typed inter-agent communication, schema enforcement |
-| AI Engine | Gemini 2.0 Flash Live API | Bidirectional streaming, function calling, native TTS |
+| AI Engine | Gemini 2.5 Flash Native Audio Live API | Bidirectional streaming, function calling, native audio |
 | Sub-Agent LLM | Gemini 2.0 Flash (text) | Fast text generation for specialized agents |
 | Image Generation | Imagen 3 via Vertex AI | High-quality culturally appropriate imagery |
-| Gateway | FastAPI + uvicorn | Async WebSocket, production-grade ASGI |
+| Gateway | FastAPI + uvicorn | Async WebSocket + REST API, production-grade ASGI |
+| Client | Flutter (Dart) mobile app | REST for session mgmt, WebSocket for streaming |
 | Database | Firestore Native | Sub-ms reads, serverless, real-time listeners |
 | Storage | Cloud Storage | Generated images, audio assets |
 | Compute | Cloud Run (Gen2) | WebSocket support, warm containers, autoscaling |
+| Runtime | Python 3.10-slim | Matches development environment |
 | Observability | Cloud Logging + Cloud Trace + Cloud Monitoring | Structured logs, distributed tracing, dashboards |
 | IaC | Terraform | Reproducible, version-controlled infrastructure |
 
@@ -134,7 +136,7 @@ Root Agent (Orchestrator)
 ```mermaid
 graph TB
   subgraph CLIENT["Client Layer"]
-    WebClient["Web Client\nAudio + Text + Vision"]
+    WebClient["Flutter Mobile App\nAudio + Text + Vision"]
   end
 
   subgraph GCP["Google Cloud Platform"]
@@ -169,7 +171,7 @@ graph TB
     end
   end
 
-  WebClient <-->|"WebSocket\nAudio + Text + Video Frames"| Gateway
+  WebClient <-->|"REST + WebSocket\nAudio + Text + Video Frames"| Gateway
   Gateway <--> ADKOrch
   ADKOrch <-->|"Persistent WS"| GeminiLive
   ADKOrch --> A2ARouter
@@ -813,14 +815,75 @@ async def dispatch_with_schema_enforcement(
 
 ## 7. Streaming Execution Flow
 
-### 7.1 WebSocket Protocol Design
+### 7.1 Flutter REST API (`/api/v1/*`)
+
+Before opening a WebSocket, the Flutter app creates a session via REST:
+
+| Method | Endpoint | Description | Request Body | Response |
+|--------|----------|-------------|-------------|----------|
+| `POST` | `/api/v1/sessions` | Create session | `{language, region?, age_group}` | `{session_id, websocket_url, created_at}` |
+| `GET` | `/api/v1/sessions/{id}` | Get session info | — | `{session_id, turn_count, language, ...}` |
+| `DELETE` | `/api/v1/sessions/{id}` | End session | — | `{status: "ended"}` |
+| `GET` | `/api/v1/sessions/{id}/history` | Get conversation | `?limit=50` | `{turns: [...]}` |
+| `POST` | `/api/v1/sessions/{id}/preferences` | Update prefs | `{language?, age_group?, region?}` | `{status: "updated"}` |
+| `GET` | `/api/v1/health` | Detailed health | — | `{status, version, uptime, active_sessions, ...}` |
+| `GET` | `/api/v1/agents` | List agents | — | `{agents: [AgentCard, ...]}` |
+
+**Flutter Integration Pattern:**
+
+```dart
+// 1. Create session via REST
+final session = await api.post('/api/v1/sessions', body: {
+  'language': 'en',
+  'region': 'east-africa',
+});
+
+// 2. Connect WebSocket with session_id
+final ws = WebSocket.connect(session.websocketUrl);
+// URL: ws://host/ws?session_id=<session_id>
+
+// 3. Stream audio
+audioRecorder.onData((pcmChunk) {
+  ws.send(jsonEncode({
+    'type': 'audio_chunk',
+    'data': base64Encode(pcmChunk),
+    'seq': nextSeq++,
+  }));
+});
+
+// 4. Receive and play responses
+ws.onMessage((msg) {
+  final data = jsonDecode(msg);
+  switch (data['type']) {
+    case 'audio_chunk':
+      audioPlayer.write(base64Decode(data['data']));
+      break;
+    case 'text_chunk':
+      updateTranscript(data['data']);
+      break;
+    case 'image_ready':
+      showImage(data['url']);
+      break;
+    case 'turn_end':
+      onTurnComplete();
+      break;
+  }
+});
+```
+
+### 7.2 WebSocket Protocol Design
+
+**Connection**: `ws[s]://host/ws?session_id=<optional>`
+
+The `session_id` query parameter enables Flutter session resumption. If
+omitted, the server auto-generates a new session ID.
 
 ```mermaid
 sequenceDiagram
-  participant Client as Web Client
+  participant Client as Flutter App
   participant Server as Cloud Run
 
-  Client->>Server: WS Upgrade
+  Client->>Server: WS Upgrade (/ws?session_id=abc123)
   Server-->>Client: 101 Switching Protocols
 
   rect rgb(30, 60, 114)
@@ -857,7 +920,7 @@ sequenceDiagram
   end
 ```
 
-### 7.2 Gemini Live API Integration Pattern
+### 7.3 Gemini Live API Integration Pattern
 
 The Orchestrator maintains a persistent Gemini Live WebSocket session
 configured with function declarations that map to A2A Task types:
@@ -866,10 +929,14 @@ configured with function declarations that map to A2A Task types:
 from google import genai
 from google.genai import types
 
-client = genai.Client(vertexai=True, project=PROJECT_ID, location=REGION)
+# API key auth (required for Live API bidiGenerateContent)
+client = genai.Client(
+    api_key=settings.GEMINI_API_KEY,
+    http_options={"api_version": "v1beta"},
+)
 
 config = types.LiveConnectConfig(
-    response_modalities=["AUDIO", "TEXT"],
+    response_modalities=["AUDIO"],  # Native audio model
     system_instruction=types.Content(
         parts=[types.Part(text=ORCHESTRATOR_SYSTEM_PROMPT)]
     ),
@@ -928,10 +995,15 @@ config = types.LiveConnectConfig(
             ),
         ),
     ])],
+    # Context window compression for long conversations
+    context_window_compression=types.ContextWindowCompressionConfig(
+        sliding_window=types.SlidingWindow(target_tokens=100000),
+    ),
+    # Voice configuration
     speech_config=types.SpeechConfig(
         voice_config=types.VoiceConfig(
             prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                voice_name="Aoede"
+                voice_name="Zephyr"  # Configurable via GEMINI_VOICE setting
             )
         )
     ),
@@ -951,7 +1023,14 @@ the input against the corresponding schema, dispatches to the correct
 pipeline, collects the streaming validated output, and sends it back to
 Gemini as a `function_response` for natural speech synthesis.
 
-### 7.3 Backpressure Management
+**Key design decisions:**
+- **API key auth** (not Vertex AI ADC): required for Live API bidiGenerateContent
+- **`api_version="v1beta"`**: required for context_window_compression and speech_config
+- **`response_modalities=["AUDIO"]`**: native audio model generates audio directly
+- **`context_window_compression`**: prevents session crash on long conversations (>100k tokens)
+- **Queue drain on interrupt**: `drain_event_queue()` prevents stale audio after user interruption
+
+### 7.4 Backpressure Management
 
 ```mermaid
 graph LR
@@ -975,7 +1054,7 @@ async def enqueue_with_backpressure(queue: asyncio.Queue, msg, timeout=5.0):
             logger.error("Backpressure: client too slow, dropping message")
 ```
 
-### 7.4 Parallel Pipeline Execution
+### 7.5 Parallel Pipeline Execution
 
 ```python
 async def handle_story_with_enrichment(request: StoryRequest):
@@ -1021,7 +1100,54 @@ async def handle_story_with_enrichment(request: StoryRequest):
     # No await needed, task completes on its own
 ```
 
-### 7.5 Latency Breakdown
+### 7.6 Streaming Metrics & TTFB Tracking
+
+The `StreamingController` tracks per-turn metrics:
+
+| Metric | Description |
+|--------|-------------|
+| `_audio_chunks_sent` | Audio chunks delivered to client (zero-buffer passthrough) |
+| `_text_chunks_sent` | Text chunks delivered to client (sentence-boundary buffered) |
+| `_dropped_count` | Messages dropped due to backpressure |
+| `_first_byte_time` | Timestamp of first chunk sent (TTFB calculation) |
+
+**Audio path**: Zero-buffering. Audio chunks pass directly to the output
+queue with no intermediate buffer — latency is the priority.
+
+**Text path**: Sentence-boundary buffered. Text accumulates until a period,
+then flushes as a complete sentence.
+
+At `turn_end`, comprehensive metrics are logged:
+
+```python
+logger.info(
+    f"Turn metrics: {total} chunks ({audio} audio, {text} text), "
+    f"TTFB={ttfb_ms:.0f}ms, dropped={dropped}"
+)
+```
+
+### 7.7 Interruption Handling
+
+When the user starts speaking while Gemini is responding:
+
+1. Gemini detects voice activity → sends `interrupted` event
+2. Orchestrator cancels all active sub-agent tasks
+3. **`drain_event_queue()`** clears buffered Gemini events (stale audio/text)
+4. Output queue is drained (discard unsent messages)
+5. Client receives `interrupted` message
+6. State transitions to `LISTENING` for new input
+
+```python
+async def handle_interrupt(self):
+    for task in self._active_tasks:
+        task.cancel()
+    self._active_tasks.clear()
+    # Drain stale events from Gemini's event queue
+    await self.gemini_session.drain_event_queue()
+    await self.streaming_controller.send_interrupted()
+```
+
+### 7.8 Latency Breakdown
 
 | Step | Target | Strategy |
 |---|---|---|
@@ -1754,14 +1880,15 @@ hadithiAI_orchestrator/
 |   |
 |   |-- gateway/
 |   |   |-- __init__.py
-|   |   |-- websocket_handler.py      <-- WebSocket endpoint
+|   |   |-- websocket_handler.py      <-- WebSocket endpoint (/ws?session_id=)
+|   |   |-- rest_api.py               <-- Flutter REST API (/api/v1/*)
 |   |   +-- health.py                 <-- Health probes
 |   |
 |   |-- orchestrator/
 |   |   |-- __init__.py
-|   |   |-- primary_orchestrator.py   <-- ADK root agent setup
+|   |   |-- primary_orchestrator.py   <-- ADK root agent + listener lifecycle
 |   |   |-- a2a_router.py             <-- A2A task routing and schema enforcement
-|   |   |-- streaming_controller.py   <-- Output stream management
+|   |   |-- streaming_controller.py   <-- Output stream (TTFB + zero-buffer audio)
 |   |   +-- circuit_breaker.py        <-- Fault tolerance
 |   |
 |   |-- agents/
@@ -1775,8 +1902,9 @@ hadithiAI_orchestrator/
 |   |
 |   +-- services/
 |       |-- __init__.py
-|       |-- gemini_client.py          <-- Gemini Live + Text client
+|       |-- gemini_client.py          <-- Gemini Live + Text client (API key + v1beta)
 |       |-- firestore_client.py       <-- Firestore operations
+|       |-- memory_manager.py         <-- Session state + context summarization
 |       +-- storage_client.py         <-- Cloud Storage operations
 |
 |-- static/
@@ -1883,7 +2011,8 @@ gcloud run deploy hadithiai-gateway \
 ### 19.3 Demo Script
 
 ```
-[0:00] Open web client, greet HadithiAI in Swahili
+[0:00] Open Flutter app, greet HadithiAI in Swahili
+       -> REST: POST /api/v1/sessions -> WebSocket connect
        -> Instant culturally appropriate response (cached greeting)
 [0:30] "Tell me a Yoruba trickster story"
        -> Gemini Live function_call -> A2A Task -> Story Pipeline
@@ -1917,6 +2046,6 @@ Total: 4 minutes. All agents demonstrated. Streaming + interruption visible.
 
 ---
 
-*Document Version: 3.0*
-*Last Updated: 2026-02-22*
+*Document Version: 4.0*
+*Last Updated: 2025*
 *Author: Abraham Imani Bahati*
