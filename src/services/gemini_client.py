@@ -110,8 +110,9 @@ class GeminiLiveSession:
             try:
                 config_kwargs["context_window_compression"] = (
                     types.ContextWindowCompressionConfig(
+                        trigger_tokens=104857,
                         sliding_window=types.SlidingWindow(
-                            target_tokens=100000,
+                            target_tokens=52428,
                         ),
                     )
                 )
@@ -186,13 +187,23 @@ class GeminiLiveSession:
                     break
                 except Exception as e:
                     if self._is_connected:
+                        err_str = str(e)
                         self._logger.error(
                             f"Receive error: {e}", exc_info=True
                         )
+                        # Fatal connection errors — stop retrying
+                        is_fatal = (
+                            "1008" in err_str
+                            or "ConnectionClosed" in type(e).__name__
+                            or "policy violation" in err_str.lower()
+                        )
                         await self._event_queue.put({
                             "type": "error",
-                            "message": str(e),
+                            "message": err_str,
+                            "fatal": is_fatal,
                         })
+                        if is_fatal:
+                            break
                         await asyncio.sleep(0.5)
                     else:
                         break
@@ -480,7 +491,7 @@ class GeminiClientPool:
                         location=self.region,
                     )
 
-            response = self._text_client.aio.models.generate_content_stream(
+            response = await self._text_client.aio.models.generate_content_stream(
                 model=settings.GEMINI_TEXT_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(

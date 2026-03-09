@@ -161,6 +161,19 @@ class StreamingController:
         )
         await self._enqueue(msg)
 
+    def reset_metrics(self):
+        """Reset streaming metrics without sending turn_end.
+
+        Called after interrupt so the next turn starts with clean counters.
+        """
+        self._chunks_sent = 0
+        self._audio_chunks_sent = 0
+        self._text_chunks_sent = 0
+        self._dropped_count = 0
+        self._stream_start_time = 0
+        self._first_byte_time = 0
+        self._text_buffer = ""
+
     def _record_first_byte(self):
         """Track time-to-first-byte for the current turn."""
         now = time.time()

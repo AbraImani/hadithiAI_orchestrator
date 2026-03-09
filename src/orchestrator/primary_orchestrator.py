@@ -198,6 +198,8 @@ class PrimaryOrchestrator:
         self.current_turn_id: Optional[str] = None
         self._active_tasks: list[asyncio.Task] = []
         self._listener_task: Optional[asyncio.Task] = None
+        self._interrupted = False  # suppress stale events after interrupt
+        self._pending_func_call: Optional[tuple] = None  # (func_id, func_name)
 
         # Sub-components
         self.memory = MemoryManager(session_id, firestore)
@@ -258,6 +260,12 @@ class PrimaryOrchestrator:
         self.current_turn_id = f"turn_{uuid.uuid4().hex[:8]}"
         self.state = OrchestratorState.PROCESSING
 
+        # Clear interrupt flag — we're starting a new turn and want
+        # to receive the response.  If there was a stale turn still
+        # in-flight, clearing now is safe because we're about to
+        # send new input anyway.
+        self._interrupted = False
+
         self._logger.info(
             f"Text input: {text[:100]}",
             extra={
@@ -280,7 +288,13 @@ class PrimaryOrchestrator:
             await self.gemini_session.send_text(text)
 
     async def handle_interrupt(self):
-        """Handle user interruption — drain queues, cancel active work."""
+        """Handle user interruption — drain queues, cancel active work.
+
+        Sets _interrupted=True so the listener discards all remaining
+        events from the old turn (audio/text/turn_complete) until Gemini
+        finishes.  This prevents a stale turn_complete from being sent
+        to the client as if it were the response to the next input.
+        """
         self._logger.info(
             "User interrupted",
             extra={"event": "interrupt", "turn_id": self.current_turn_id},
@@ -289,15 +303,33 @@ class PrimaryOrchestrator:
         prev_state = self.state
         self.state = OrchestratorState.INTERRUPTED
 
+        # Tell the listener to drop events until the old turn completes
+        self._interrupted = True
+
         # Cancel active sub-agent tasks
         for task in self._active_tasks:
             if not task.done():
                 task.cancel()
         self._active_tasks.clear()
 
-        # Drain the Gemini event queue (discard buffered audio/text)
+        # Drain the Gemini event queue (discard already-buffered events)
         if self.gemini_session:
             self.gemini_session.drain_event_queue()
+
+        # If a function call was in-flight, send a dummy response
+        # so Gemini isn't stuck waiting for tool_response forever.
+        if self._pending_func_call and self.gemini_session:
+            fid, fname = self._pending_func_call
+            self._pending_func_call = None
+            self._logger.debug(
+                f"Sending dummy tool response for interrupted {fname}"
+            )
+            try:
+                await self.gemini_session.send_function_response(
+                    fid, fname, "[interrupted by user]"
+                )
+            except Exception:
+                pass  # best-effort
 
         # Drain the output queue (discard unsent messages to client)
         while not self.output_queue.empty():
@@ -305,6 +337,9 @@ class PrimaryOrchestrator:
                 self.output_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+
+        # Reset streaming metrics without sending turn_end
+        self.stream_controller.reset_metrics()
 
         self.state = OrchestratorState.LISTENING
         self.current_turn_id = f"turn_{uuid.uuid4().hex[:8]}"
@@ -346,6 +381,21 @@ class PrimaryOrchestrator:
         """
         try:
             async for event in self.gemini_session.receive_events():
+                # ── Drop stale events after interrupt ──
+                if self._interrupted:
+                    if event["type"] == "turn_complete":
+                        # The interrupted turn finished — Gemini is
+                        # now ready for new input.  Clear the flag
+                        # WITHOUT sending turn_end to the client.
+                        self._interrupted = False
+                        self._logger.debug(
+                            "Suppressed stale turn_complete from interrupted turn"
+                        )
+                    else:
+                        # Discard leftover audio/text from the old turn
+                        pass
+                    continue
+
                 match event["type"]:
                     case "text":
                         # Stream text chunk to client
@@ -401,6 +451,10 @@ class PrimaryOrchestrator:
                             event.get("message", "AI processing error")
                         )
                         self.state = OrchestratorState.IDLE
+                        # Fatal errors (connection closed) — stop listening
+                        if event.get("fatal"):
+                            self._logger.warning("Fatal Gemini error, stopping listener")
+                            return
 
         except asyncio.CancelledError:
             pass
@@ -425,6 +479,9 @@ class PrimaryOrchestrator:
         func_name = event.get("name", "")
         func_args = event.get("args", {})
         func_id = event.get("id", "")
+
+        # Track so handle_interrupt() can send dummy response
+        self._pending_func_call = (func_id, func_name)
 
         self._logger.info(
             f"Function call: {func_name}({func_args})",
@@ -516,6 +573,7 @@ class PrimaryOrchestrator:
             result_text = "".join(full_result)
 
         # Send the complete result back to Gemini as function response
+        self._pending_func_call = None
         if self.gemini_session:
             await self.gemini_session.send_function_response(
                 func_id, func_name, result_text
