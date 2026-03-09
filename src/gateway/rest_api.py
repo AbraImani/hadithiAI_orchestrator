@@ -117,7 +117,9 @@ async def create_session(req: CreateSessionRequest, request: Request):
 
     # Build WebSocket URL relative to the server
     host = request.headers.get("host", "localhost:8080")
-    scheme = "wss" if request.url.scheme == "https" else "ws"
+    # Cloud Run terminates TLS at load balancer, so check X-Forwarded-Proto
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    scheme = "wss" if proto == "https" else "ws"
     ws_url = f"{scheme}://{host}/ws?session_id={session_id}"
 
     logger.info(

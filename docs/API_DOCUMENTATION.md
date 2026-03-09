@@ -1,85 +1,103 @@
 # HadithiAI Orchestrator — API Documentation
 
-> **Version:** 2.0.0  
-> **Base URL:** `http://localhost:8080` (dev) or `https://<cloud-run-url>` (prod)  
+> **Version:** 0.1.0  
+> **Base URL:** `https://hadithiai-orchestrator-292237971535.us-central1.run.app` (production) or `http://localhost:8080` (dev)  
 > **Protocol:** REST (JSON) + WebSocket (JSON frames)
 
 ---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Authentication](#authentication)
-3. [REST API Endpoints](#rest-api-endpoints)
-4. [WebSocket Protocol](#websocket-protocol)
-5. [Agent Cards](#agent-cards)
-6. [Error Handling](#error-handling)
-7. [Flutter Integration Guide](#flutter-integration-guide)
+1. [Quick Start](#quick-start)
+2. [Architecture Overview](#architecture-overview)
+3. [REST API — Session Management](#rest-api--session-management)
+4. [WebSocket — Real-Time Communication](#websocket--real-time-communication)
+5. [Audio & Video Specifications](#audio--video-specifications)
+6. [Agent System](#agent-system)
+7. [Error Handling](#error-handling)
+8. [Flutter Integration Guide](#flutter-integration-guide)
+9. [Configuration](#configuration)
 
 ---
 
-## Overview
+## Quick Start
 
-HadithiAI is an African Immersive Oral AI Agent combining:
+HadithiAI has **two communication channels**:
 
-- **Gemini Live API** for real-time bidirectional audio streaming
-- **REST API** for session management and non-streaming operations
-- **WebSocket** for real-time audio/text/video communication
-- **Sub-agents** for story generation, riddles, cultural context, and image generation
+| Channel | Endpoint | Purpose |
+|---------|----------|---------|
+| **REST** | `/api/v1/*` | Session management only (create, read, delete, history, preferences) |
+| **WebSocket** | `/ws` | **ALL real-time communication** — audio, text, video, interrupts |
 
-### Architecture
+> ⚠️ **Important:** There is NO REST endpoint for audio or vision.  
+> Audio streaming, text chat, and video frames ALL go through the WebSocket endpoint `/ws`.
+
+### Minimal Flow (3 Steps)
 
 ```
-Flutter App
-   ├── REST API (/api/v1/*) → Session CRUD, preferences, history
-   └── WebSocket (/ws)      → Real-time audio/text streaming
-         └── Orchestrator → Gemini Live API (native audio)
-                          → Sub-agents (story, riddle, cultural, visual)
+Step 1: POST /api/v1/sessions → Get session_id
+Step 2: Connect to ws://<host>/ws?session_id=<session_id>
+Step 3: Send/receive audio_chunk, text_input, video_frame via WebSocket
 ```
 
 ---
 
-## Authentication
+## Architecture Overview
 
-| Method | Usage |
-|--------|-------|
-| **API Key** | Set `GEMINI_API_KEY` in `.env` (development) |
-| **ADC** | Google Application Default Credentials (Cloud Run) |
-
-The server authenticates with Google's Gemini API internally. Client-to-server authentication is not currently enforced (add your own auth middleware for production).
+```
+┌──────────────┐
+│  Flutter App  │
+└──────┬───────┘
+       │
+       ├── REST API (/api/v1/*)
+       │     └── Session CRUD, preferences, history, agents list
+       │         (NO audio, NO video, NO streaming)
+       │
+       └── WebSocket (/ws)
+             └── Real-time bidirectional communication:
+                   • audio_chunk  → Send/receive audio (PCM, base64)
+                   • text_input   → Send text messages
+                   • video_frame  → Send camera frames (base64 JPEG/PNG)
+                   • interrupt    → Stop AI response
+                   │
+                   └── Server (Orchestrator)
+                         ├── Gemini Live API (native audio generation)
+                         └── Sub-agents:
+                               • Story Agent (African stories)
+                               • Riddle Agent (African riddles)
+                               • Cultural Grounding (context/validation)
+                               • Visual Agent (illustrations)
+                               • Memory Context (session memory)
+```
 
 ---
 
-## REST API Endpoints
+## REST API — Session Management
 
-All REST endpoints are prefixed with `/api/v1`.
+All REST endpoints use JSON. Prefix: `/api/v1`.
 
-### Health Endpoints
+> These endpoints are for managing sessions only. They do NOT handle audio, video, or real-time streaming.
+
+### Health Checks
 
 #### `GET /health`
-Basic liveness probe.
+Basic liveness check.
 
 ```json
 // Response 200
-{
-  "status": "healthy",
-  "service": "hadithiai-live"
-}
+{ "status": "healthy", "service": "hadithiai-live" }
 ```
 
 #### `GET /ready`
-Readiness probe with active connection count.
+Readiness check with connection count.
 
 ```json
 // Response 200
-{
-  "status": "ready",
-  "active_connections": 2
-}
+{ "status": "ready", "active_connections": 2 }
 ```
 
 #### `GET /api/v1/health`
-Detailed health check with uptime and Gemini pool status.
+Detailed health with uptime and Gemini pool status.
 
 ```json
 // Response 200
@@ -95,17 +113,16 @@ Detailed health check with uptime and Gemini pool status.
 
 ---
 
-### Session Management
+### Sessions
 
-#### `POST /api/v1/sessions`
-Create a new conversation session.
+#### `POST /api/v1/sessions` — Create Session
 
 **Request:**
 ```json
 {
-  "language": "en",       // optional, default "en"
+  "language": "en",        // optional, default "en"
   "region": "east-africa", // optional
-  "age_group": "adult"    // optional, default "adult"
+  "age_group": "adult"     // optional, default "adult"
 }
 ```
 
@@ -118,24 +135,18 @@ Create a new conversation session.
 }
 ```
 
+> 💡 Use the returned `websocket_url` to open the WebSocket connection.
+
 **cURL:**
 ```bash
-curl -X POST http://localhost:8080/api/v1/sessions \
+curl -X POST https://<host>/api/v1/sessions \
   -H "Content-Type: application/json" \
   -d '{"language": "en", "age_group": "child"}'
 ```
 
-**PowerShell:**
-```powershell
-Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/sessions `
-  -ContentType "application/json" `
-  -Body '{"language":"en","age_group":"child"}'
-```
-
 ---
 
-#### `GET /api/v1/sessions/{session_id}`
-Get session metadata.
+#### `GET /api/v1/sessions/{session_id}` — Get Session
 
 **Response 200:**
 ```json
@@ -150,34 +161,23 @@ Get session metadata.
 }
 ```
 
-**Response 404:**
-```json
-{
-  "detail": "Session not found"
-}
-```
+**Response 404:** `{ "detail": "Session not found" }`
 
 ---
 
-#### `DELETE /api/v1/sessions/{session_id}`
-End and clean up a session.
+#### `DELETE /api/v1/sessions/{session_id}` — End Session
 
 **Response 200:**
 ```json
-{
-  "status": "ended",
-  "session_id": "a1b2c3d4e5f6"
-}
+{ "status": "ended", "session_id": "a1b2c3d4e5f6" }
 ```
 
 ---
 
-#### `GET /api/v1/sessions/{session_id}/history`
-Get conversation history.
+#### `GET /api/v1/sessions/{session_id}/history` — Get History
 
-**Query Parameters:**
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
 | `limit` | int | 50 | Max turns to return |
 
 **Response 200:**
@@ -205,15 +205,14 @@ Get conversation history.
 
 ---
 
-#### `POST /api/v1/sessions/{session_id}/preferences`
-Update user preferences.
+#### `POST /api/v1/sessions/{session_id}/preferences` — Update Preferences
 
 **Request:**
 ```json
 {
-  "language": "sw",          // optional
-  "age_group": "child",     // optional
-  "region": "west-africa"   // optional
+  "language": "sw",
+  "age_group": "child",
+  "region": "west-africa"
 }
 ```
 
@@ -222,10 +221,7 @@ Update user preferences.
 {
   "status": "updated",
   "session_id": "a1b2c3d4e5f6",
-  "updates": {
-    "language_pref": "sw",
-    "region_pref": "west-africa"
-  }
+  "updates": { "language_pref": "sw", "region_pref": "west-africa" }
 }
 ```
 
@@ -233,8 +229,7 @@ Update user preferences.
 
 ### Agent Discovery
 
-#### `GET /api/v1/agents`
-List available agent capabilities (Agent Cards).
+#### `GET /api/v1/agents` — List Agents
 
 **Response 200:**
 ```json
@@ -243,32 +238,23 @@ List available agent capabilities (Agent Cards).
     {
       "name": "story_agent",
       "description": "Generates culturally-rooted African stories",
-      "input_schema": "StoryRequest",
-      "output_schema": "StoryChunk",
-      "supported_cultures": ["Ashanti", "Yoruba", "Zulu", "Swahili", "Maasai"],
       "capabilities": ["streaming", "visual_moments"]
     },
     {
       "name": "riddle_agent",
-      "description": "Creates and manages African riddles",
-      "input_schema": "RiddleRequest",
-      "output_schema": "RiddlePayload"
+      "description": "Creates and manages African riddles"
     },
     {
       "name": "cultural_grounding",
-      "description": "Provides cultural context and validation",
-      "capabilities": ["fact_checking", "cultural_validation"]
+      "description": "Provides cultural context and validation"
     },
     {
       "name": "visual_agent",
-      "description": "Generates culturally appropriate illustrations",
-      "input_schema": "ImageRequest",
-      "output_schema": "ImageResult"
+      "description": "Generates culturally appropriate illustrations"
     },
     {
       "name": "memory_context",
-      "description": "Tracks session memory and context",
-      "capabilities": ["context_summary", "preference_tracking"]
+      "description": "Tracks session memory and context"
     }
   ],
   "total": 5
@@ -277,45 +263,53 @@ List available agent capabilities (Agent Cards).
 
 ---
 
-## WebSocket Protocol
+## WebSocket — Real-Time Communication
+
+> **This is the main endpoint.** All audio, text, video, and interactive features go through here.
 
 ### Connection
 
 ```
-ws://localhost:8080/ws?session_id=<optional_session_id>
+ws://<host>/ws?session_id=<optional_session_id>
+wss://<host>/ws?session_id=<optional_session_id>  (production with TLS)
 ```
 
-If `session_id` is omitted, a new one is generated server-side.
+If `session_id` is omitted, the server generates a new one.
 
 ### Connection Lifecycle
 
 ```
-Client                          Server
-  |                               |
-  |--- WebSocket Connect -------->|
-  |<-- session_created -----------|
-  |                               |
-  |--- audio_chunk (base64) ----->|  ← streaming audio input
-  |--- text_input --------------->|  ← text message
-  |--- video_frame (base64) ----->|  ← optional video
-  |                               |
-  |<-- audio_chunk (base64) ------|  ← streaming audio response
-  |<-- text_chunk ----------------|  ← text/thought response
-  |<-- image_ready ---------------|  ← generated illustration URL
-  |<-- agent_state ---------------|  ← agent status update
-  |<-- turn_end ------------------|  ← end of response turn
-  |                               |
-  |--- interrupt ----------------->|  ← stop current response
-  |<-- interrupted  ---------------|  ← (optional) confirm
-  |                               |
-  |--- ping ---------------------->|
-  |<-- pong ----------------------|
+Client                              Server
+  │                                    │
+  │─── WebSocket Connect ────────────>│
+  │<── session_created ───────────────│  (you now have session_id)
+  │                                    │
+  │─── audio_chunk (base64 PCM) ─────>│  🎤 streaming audio input
+  │─── text_input ───────────────────>│  ⌨️  text message
+  │─── video_frame (base64 JPEG) ────>│  📷 camera frame
+  │                                    │
+  │<── audio_chunk (base64 PCM) ──────│  🔊 AI audio response
+  │<── text_chunk ────────────────────│  💬 AI text response
+  │<── image_ready ───────────────────│  🖼️  generated illustration
+  │<── agent_state ───────────────────│  ℹ️  status update
+  │<── turn_end ──────────────────────│  ✅ response complete
+  │                                    │
+  │─── interrupt ────────────────────>│  🛑 stop current response
+  │<── interrupted ───────────────────│  ✅ confirmed
+  │                                    │
+  │─── ping ─────────────────────────>│  💓 keepalive
+  │<── pong ──────────────────────────│
 ```
+
+---
 
 ### Client → Server Messages
 
-#### `audio_chunk`
-Stream audio data to the AI.
+Every message is a JSON object with a `type` field:
+
+#### 1. `audio_chunk` — Stream Audio Input 🎤
+
+Send microphone audio to the AI. The AI will process it and respond with audio.
 
 ```json
 {
@@ -325,10 +319,15 @@ Stream audio data to the AI.
 }
 ```
 
-Audio format: **16-bit PCM, 16kHz, mono**. Chunk size: ~100ms (3200 bytes raw → base64 encoded).
+- **Format:** 16-bit PCM, 16kHz, mono
+- **Chunk size:** ~100ms = 3,200 bytes raw → base64-encoded
+- **Stream continuously** while the user is speaking
 
-#### `text_input`
-Send a text message.
+---
+
+#### 2. `text_input` — Send Text Message ⌨️
+
+Send a text message instead of audio.
 
 ```json
 {
@@ -338,21 +337,27 @@ Send a text message.
 }
 ```
 
-#### `video_frame`
-Send a video frame for visual context.
+---
+
+#### 3. `video_frame` — Send Camera Frame 📷
+
+Send a camera/image frame for visual context (e.g., show a book page to the AI).
 
 ```json
 {
   "type": "video_frame",
-  "data": "<base64-encoded JPEG/PNG>",
+  "data": "<base64-encoded JPEG or PNG>",
   "width": 640,
   "height": 480,
   "seq": 3
 }
 ```
 
-#### `interrupt`
-Stop the current response immediately.
+---
+
+#### 4. `interrupt` — Stop Current Response 🛑
+
+Immediately stop the AI's current response (like pressing a stop button).
 
 ```json
 {
@@ -361,8 +366,11 @@ Stop the current response immediately.
 }
 ```
 
-#### `control`
-Change settings mid-session.
+---
+
+#### 5. `control` — Change Settings
+
+Change settings during a session.
 
 ```json
 {
@@ -373,18 +381,19 @@ Change settings mid-session.
 }
 ```
 
-#### `ping`
-Keepalive ping.
+---
+
+#### 6. `ping` — Keepalive
 
 ```json
-{
-  "type": "ping",
-  "seq": 6
-}
+{ "type": "ping", "seq": 6 }
 ```
 
-#### `session_init`
-Resume an existing session.
+---
+
+#### 7. `session_init` — Resume Session
+
+Connect to an existing session.
 
 ```json
 {
@@ -399,7 +408,7 @@ Resume an existing session.
 ### Server → Client Messages
 
 #### `session_created`
-Sent immediately after connection.
+Sent immediately after WebSocket connection.
 
 ```json
 {
@@ -410,8 +419,8 @@ Sent immediately after connection.
 }
 ```
 
-#### `audio_chunk`
-Streaming audio response (24kHz PCM, base64-encoded).
+#### `audio_chunk` — AI Audio Response 🔊
+Streaming AI-generated audio. Play these chunks as they arrive.
 
 ```json
 {
@@ -422,10 +431,10 @@ Streaming audio response (24kHz PCM, base64-encoded).
 }
 ```
 
-Audio format: **16-bit PCM, 24kHz, mono**.
+- **Format:** 16-bit PCM, **24kHz**, mono
+- Multiple chunks arrive per response — play them sequentially
 
-#### `text_chunk`
-Text response (Gemini's thoughts or agent text).
+#### `text_chunk` — AI Text Response 💬
 
 ```json
 {
@@ -437,8 +446,7 @@ Text response (Gemini's thoughts or agent text).
 }
 ```
 
-#### `image_ready`
-A generated illustration is ready.
+#### `image_ready` — Generated Illustration 🖼️
 
 ```json
 {
@@ -450,8 +458,7 @@ A generated illustration is ready.
 }
 ```
 
-#### `agent_state`
-Agent processing status update.
+#### `agent_state` — Agent Status ℹ️
 
 ```json
 {
@@ -463,8 +470,8 @@ Agent processing status update.
 }
 ```
 
-#### `turn_end`
-End of the current response turn. Client can now send the next input.
+#### `turn_end` — Response Complete ✅
+The AI finished responding. The client can enable the microphone / send next input.
 
 ```json
 {
@@ -474,8 +481,7 @@ End of the current response turn. Client can now send the next input.
 }
 ```
 
-#### `interrupted`
-Confirms the interrupt was processed.
+#### `interrupted` — Interrupt Confirmed
 
 ```json
 {
@@ -485,8 +491,7 @@ Confirms the interrupt was processed.
 }
 ```
 
-#### `error`
-An error occurred.
+#### `error` — Error
 
 ```json
 {
@@ -497,46 +502,69 @@ An error occurred.
 }
 ```
 
-#### `pong`
-Keepalive response.
+#### `pong` — Keepalive Response
 
 ```json
-{
-  "type": "pong",
-  "seq": 7,
-  "timestamp": 1709654403.0
-}
+{ "type": "pong", "seq": 7, "timestamp": 1709654403.0 }
 ```
 
 ---
 
-## Agent Cards
+## Audio & Video Specifications
 
-HadithiAI uses 5 specialized sub-agents orchestrated by Gemini Live API function calling:
+### Audio Format
 
-| Agent | Trigger Function | Description |
-|-------|-----------------|-------------|
-| **Story Agent** | `tell_story(culture, theme, complexity)` | African oral tradition stories |
-| **Riddle Agent** | `pose_riddle(culture, difficulty)` | African riddles with hints |
-| **Cultural Grounding** | `get_cultural_context(topic, culture)` | Cultural context and validation |
-| **Visual Agent** | `generate_scene_image(scene, culture)` | Culturally appropriate illustrations |
-| **Memory Context** | (internal) | Session memory and context tracking |
+| Direction | Format | Sample Rate | Channels | Bit Depth | Encoding |
+|-----------|--------|-------------|----------|-----------|----------|
+| **Client → Server** | PCM | 16,000 Hz | Mono | 16-bit | base64 |
+| **Server → Client** | PCM | 24,000 Hz | Mono | 16-bit | base64 |
 
-### Function Call Flow
+- **Chunk duration:** ~100ms per audio_chunk
+- **Raw chunk size (input):** 3,200 bytes → base64 ≈ 4,267 chars
+- Stream continuously while user speaks
+
+### Video Format
+
+| Property | Value |
+|----------|-------|
+| Format | JPEG or PNG |
+| Encoding | base64 |
+| Recommended size | 640×480 |
+| Purpose | Visual context for the AI (e.g., show a book, drawing, etc.) |
+
+---
+
+## Agent System
+
+HadithiAI uses 5 specialized sub-agents, automatically triggered by the AI via function calling:
+
+| Agent | Trigger (Automatic) | What It Does |
+|-------|---------------------|--------------|
+| **Story Agent** | User asks for a story | Generates African oral tradition stories (Ashanti, Yoruba, Zulu, Swahili, Maasai) |
+| **Riddle Agent** | User wants a riddle | Creates African riddles with hints and cultural explanations |
+| **Cultural Grounding** | Internal validation | Ensures cultural accuracy and provides context |
+| **Visual Agent** | Story has a visual moment | Generates culturally appropriate illustrations |
+| **Memory Context** | Internal | Tracks conversation memory and user preferences |
+
+### How It Works (Inside)
 
 ```
-1. User says: "Tell me an Anansi story"
-2. Gemini Live API detects intent → function_call: tell_story(...)
+1. User speaks: "Tell me an Anansi story" (via audio_chunk or text_input)
+2. Gemini Live API understands → calls function: tell_story(culture="Ashanti", theme="trickster")
 3. Orchestrator dispatches to Story Agent
-4. Story Agent uses gemini-2.0-flash (text) to generate story
-5. Result sent back to Gemini as tool_response
-6. Gemini synthesizes story into native audio
-7. Audio chunks streamed to client
+4. Story Agent generates the story using gemini-2.0-flash (text model)
+5. Story text is sent back to Gemini Live API
+6. Gemini synthesizes the story into natural audio
+7. Audio chunks stream back to client via WebSocket
 ```
+
+> **You don't call agents directly.** Just talk to the AI naturally, and it automatically routes to the right agent.
 
 ---
 
 ## Error Handling
+
+### REST Errors
 
 | HTTP Status | Meaning |
 |-------------|---------|
@@ -545,89 +573,160 @@ HadithiAI uses 5 specialized sub-agents orchestrated by Gemini Live API function
 | 422 | Validation error (invalid request body) |
 | 500 | Internal server error |
 
-WebSocket errors are sent as `error` type messages. Fatal errors close the connection.
+### WebSocket Errors
 
-### Common Error Scenarios
+Errors are sent as `error` type messages. Fatal errors close the connection.
 
 | Error | Cause | Resolution |
 |-------|-------|------------|
-| `Server initialization failed: timed out` | Gemini API connection timeout | Retry connection |
-| `1008 Operation not supported` | Gemini session closed unexpectedly | Reconnect with new session |
-| `Session not found` | Invalid or expired session_id | Create a new session |
+| `Server initialization failed: timed out` | Gemini API connection timeout | Retry WebSocket connection |
+| `1008 Operation not supported` | Gemini session expired | Reconnect with new session |
+| `Session not found` | Invalid session_id | Create a new session via REST |
 
 ---
 
 ## Flutter Integration Guide
 
-### Typical Flow
+### Complete Flow
 
 ```dart
-// 1. Create session via REST
-final session = await http.post('/api/v1/sessions', body: {
-  'language': 'en',
-  'age_group': 'child',
-});
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:web_socket_channel/web_socket_channel.dart';
+
+const baseUrl = 'https://<cloud-run-url>';
+
+// ─── Step 1: Create Session (REST) ───
+final response = await http.post(
+  Uri.parse('$baseUrl/api/v1/sessions'),
+  headers: {'Content-Type': 'application/json'},
+  body: jsonEncode({
+    'language': 'en',
+    'age_group': 'child',
+  }),
+);
+final session = jsonDecode(response.body);
 final sessionId = session['session_id'];
-final wsUrl = session['websocket_url'];
 
-// 2. Connect WebSocket
-final ws = await WebSocket.connect(wsUrl);
+// ─── Step 2: Connect WebSocket ───
+final wsUrl = 'wss://<cloud-run-url>/ws?session_id=$sessionId';
+final channel = WebSocketChannel.connect(Uri.parse(wsUrl));
 
-// 3. Wait for session_created
-final created = await ws.first; // {"type": "session_created", ...}
-
-// 4. Stream audio
-ws.add(jsonEncode({
-  'type': 'audio_chunk',
-  'data': base64Encode(pcmAudioBytes),
-  'seq': seqCounter++,
-}));
-
-// 5. Receive responses
-ws.listen((msg) {
-  final data = jsonDecode(msg);
-  switch (data['type']) {
+// ─── Step 3: Listen for responses ───
+channel.stream.listen((message) {
+  final msg = jsonDecode(message);
+  
+  switch (msg['type']) {
+    case 'session_created':
+      print('Connected! Session: ${msg['session_id']}');
+      break;
+      
     case 'audio_chunk':
-      playAudio(base64Decode(data['data']));
+      // Decode base64 → PCM bytes → play audio (24kHz, 16-bit, mono)
+      final audioBytes = base64Decode(msg['data']);
+      audioPlayer.playPcm(audioBytes, sampleRate: 24000);
       break;
+      
     case 'text_chunk':
-      showCaption(data['data']);
+      // Show subtitle/caption
+      showCaption(msg['data']);
       break;
+      
+    case 'image_ready':
+      // Display generated illustration
+      showImage(msg['url']);
+      break;
+      
     case 'turn_end':
+      // AI finished responding → enable microphone
       enableMicrophone();
       break;
-    case 'image_ready':
-      showImage(data['url']);
+      
+    case 'interrupted':
+      // Interrupt confirmed
+      break;
+      
+    case 'error':
+      print('Error: ${msg['error']}');
       break;
   }
 });
 
-// 6. Interrupt
-ws.add(jsonEncode({'type': 'interrupt', 'seq': seqCounter++}));
+// ─── Step 4: Send audio from microphone ───
+int seq = 1;
+
+void onMicrophoneData(List<int> pcmBytes) {
+  channel.sink.add(jsonEncode({
+    'type': 'audio_chunk',
+    'data': base64Encode(pcmBytes),  // 16kHz, 16-bit, mono PCM
+    'seq': seq++,
+  }));
+}
+
+// ─── Step 5: Send text instead of audio ───
+void sendText(String text) {
+  channel.sink.add(jsonEncode({
+    'type': 'text_input',
+    'data': text,
+    'seq': seq++,
+  }));
+}
+
+// ─── Step 6: Interrupt AI ───
+void interrupt() {
+  channel.sink.add(jsonEncode({
+    'type': 'interrupt',
+    'seq': seq++,
+  }));
+}
+
+// ─── Step 7: Send camera frame (optional) ───
+void sendCameraFrame(List<int> jpegBytes) {
+  channel.sink.add(jsonEncode({
+    'type': 'video_frame',
+    'data': base64Encode(jpegBytes),
+    'width': 640,
+    'height': 480,
+    'seq': seq++,
+  }));
+}
+
+// ─── Cleanup ───
+await channel.sink.close();
+await http.delete(Uri.parse('$baseUrl/api/v1/sessions/$sessionId'));
 ```
 
-### Audio Configuration
+### Summary for Flutter Developer
 
-| Parameter | Input (Client → Server) | Output (Server → Client) |
-|-----------|------------------------|--------------------------|
-| Format | PCM 16-bit | PCM 16-bit |
-| Sample Rate | 16,000 Hz | 24,000 Hz |
-| Channels | Mono | Mono |
-| Chunk Duration | ~100ms | Variable |
+| What You Want | How to Do It |
+|---------------|--------------|
+| Create a session | `POST /api/v1/sessions` |
+| Stream audio to AI | WebSocket → send `audio_chunk` messages |
+| Receive AI audio | WebSocket → listen for `audio_chunk` messages |
+| Send text to AI | WebSocket → send `text_input` message |
+| Receive AI text | WebSocket → listen for `text_chunk` messages |
+| Send camera/image | WebSocket → send `video_frame` message |
+| Receive illustrations | WebSocket → listen for `image_ready` messages |
+| Stop AI response | WebSocket → send `interrupt` message |
+| Know when AI is done | WebSocket → listen for `turn_end` message |
+| Get conversation history | `GET /api/v1/sessions/{id}/history` |
+| Delete session | `DELETE /api/v1/sessions/{id}` |
 
 ---
 
-## Configuration (Environment Variables)
+## Configuration
+
+Environment variables (set in Cloud Run or `.env` for local dev):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GEMINI_API_KEY` | — | Google Gemini API key |
+| `HADITHI_GEMINI_API_KEY` | — | **Required.** Google Gemini API key |
 | `HADITHI_PROJECT_ID` | `hadithiai-live` | GCP project ID |
 | `HADITHI_REGION` | `us-central1` | GCP region |
-| `HADITHI_GEMINI_MODEL` | `gemini-2.5-flash-native-audio-latest` | Live API model |
+| `HADITHI_GEMINI_MODEL` | `gemini-2.5-flash-native-audio-latest` | Gemini Live API model |
 | `HADITHI_GEMINI_TEXT_MODEL` | `gemini-2.0-flash` | Text generation model |
-| `HADITHI_GEMINI_VOICE` | `Zephyr` | Voice for speech synthesis |
-| `HADITHI_GEMINI_POOL_SIZE` | `3` | Number of warm sessions |
+| `HADITHI_GEMINI_VOICE` | `Zephyr` | Voice for audio synthesis |
+| `HADITHI_GEMINI_POOL_SIZE` | `3` | Number of warm Gemini sessions |
 | `HADITHI_DEBUG` | `false` | Enable debug logging |
 | `HADITHI_LOG_LEVEL` | `INFO` | Log level |
-| `HADITHI_MAX_CONCURRENT_SESSIONS` | `200` | Max simultaneous connections |
+| `HADITHI_MAX_CONCURRENT_SESSIONS` | `200` | Max simultaneous WebSocket connections |
