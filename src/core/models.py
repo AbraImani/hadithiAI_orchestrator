@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from enum import Enum
-from typing import Optional, Any
+from typing import Optional, Any, List
 from pydantic import BaseModel, Field
 
 
@@ -161,3 +161,35 @@ class A2ATask(BaseModel):
     created_at: float = Field(default_factory=time.time)
     result: Optional[dict] = None
     error: Optional[str] = None
+
+
+# ─── Flutter Data Models ─────────────────────────────────────────────
+# These models match the Flutter frontend classes exactly so the
+# REST API responses can be deserialized by the mobile app.
+
+class RiddleModel(BaseModel):
+    """Matches Flutter RiddleModel exactly.
+
+    choices is List[Dict[str, bool]] where each dict maps
+    an answer string to True (correct) or False (wrong).
+    Example: [{"Elephant": True}, {"Lion": False}, ...]
+    """
+    id: str
+    question: str
+    choices: List[dict]          # [{"answer text": true/false}, ...]
+    tip: Optional[str] = None
+    help: Optional[str] = None
+    language: Optional[str] = None
+
+
+class StoryCategoryModel(BaseModel):
+    """Matches Flutter StoryCategoryModel exactly.
+
+    Used for the story catalog/listing in the mobile UI.
+    """
+    title: str
+    description: str
+    imageUrl: str = ""
+    day: int = 1
+    month: str = ""
+    region: str = ""

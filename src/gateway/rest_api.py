@@ -9,24 +9,31 @@ Endpoints:
   POST   /api/v1/sessions              → Create a new session
   GET    /api/v1/sessions/{id}         → Get session metadata
   DELETE /api/v1/sessions/{id}         → End a session
-  POST   /api/v1/sessions/{id}/text    → Send text (non-streaming)
   GET    /api/v1/sessions/{id}/history → Get conversation history
   POST   /api/v1/sessions/{id}/preferences → Update preferences
   GET    /api/v1/health                → Detailed health check
   GET    /api/v1/agents                → List available agent capabilities
+  POST   /api/v1/stories/generate      → Generate story catalog entries
+  POST   /api/v1/riddles/generate      → Generate a riddle (RiddleModel)
+  POST   /api/v1/riddles/{id}/answer   → Check a riddle answer
 """
 
 import asyncio
 import logging
 import time
 import uuid
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from core.config import settings
-from core.models import ServerMessageType, SessionMetadata
+from core.models import (
+    ServerMessageType,
+    SessionMetadata,
+    RiddleModel,
+    StoryCategoryModel,
+)
 from orchestrator.a2a_router import list_agent_cards
 
 logger = logging.getLogger(__name__)
@@ -88,6 +95,33 @@ class HealthDetailResponse(BaseModel):
     uptime_seconds: float
     active_sessions: int
     gemini_pool_ready: bool
+
+
+class GenerateStoriesRequest(BaseModel):
+    """Request to generate story catalog entries."""
+    culture: str = "african"
+    region: str = ""
+    count: int = Field(default=5, ge=1, le=20)
+    language: str = "en"
+
+
+class GenerateRiddleRequest(BaseModel):
+    """Request to generate a riddle matching Flutter RiddleModel."""
+    culture: str = "East African"
+    difficulty: str = "medium"
+    language: str = "en"
+
+
+class CheckAnswerRequest(BaseModel):
+    """Request to check a riddle answer."""
+    selected_answer: str
+
+
+class CheckAnswerResponse(BaseModel):
+    """Response after checking a riddle answer."""
+    correct: bool
+    correct_answer: str
+    explanation: str = ""
 
 
 # ─── Module state ─────────────────────────────────────────────────
@@ -242,3 +276,175 @@ async def list_agents():
         "agents": list_agent_cards(),
         "total": len(list_agent_cards()),
     }
+
+
+# ─── Story Catalog Endpoints ─────────────────────────────────────
+
+# In-memory cache for generated stories (cleared on restart)
+_story_cache: dict[str, list[dict]] = {}
+
+
+@router.post("/stories/generate", response_model=List[StoryCategoryModel])
+async def generate_stories(req: GenerateStoriesRequest, request: Request):
+    """
+    Generate story catalog entries matching Flutter StoryCategoryModel.
+
+    Returns a list of story metadata (title, description, imageUrl,
+    day, month, region) for the mobile UI story browser.
+    """
+    cache_key = f"{req.culture}_{req.region}_{req.language}_{req.count}"
+    if cache_key in _story_cache:
+        return _story_cache[cache_key]
+
+    gemini_pool = request.app.state.gemini_pool
+
+    prompt = f"""Generate exactly {req.count} African story catalog entries as a JSON array.
+Each entry must have this exact structure:
+{{
+  "title": "Story title (short, evocative)",
+  "description": "2-3 sentence description of the story",
+  "imageUrl": "",
+  "day": <day number 1-30>,
+  "month": "<month name>",
+  "region": "{req.region or req.culture}"
+}}
+
+Requirements:
+- Stories must be from {req.culture} tradition
+- Region: {req.region or req.culture}
+- Language: {req.language}
+- Each story should have a unique theme (wisdom, trickster, creation, courage, love, origin, moral)
+- Titles should be evocative and culturally authentic
+- Descriptions should make the reader want to hear the story
+- Distribute days across the month
+
+Respond ONLY with a valid JSON array. No markdown, no code blocks."""
+
+    system = "You are a story catalog generator. Output only valid JSON arrays."
+
+    try:
+        result_parts = []
+        async for chunk in gemini_pool.generate_text_stream(
+            prompt=prompt, system_instruction=system
+        ):
+            result_parts.append(chunk)
+        raw = "".join(result_parts)
+
+        # Parse JSON
+        import json
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.split("\n")
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            cleaned = "\n".join(lines).strip()
+
+        stories_data = json.loads(cleaned)
+        if not isinstance(stories_data, list):
+            stories_data = [stories_data]
+
+        stories = []
+        for s in stories_data[:req.count]:
+            stories.append(StoryCategoryModel(
+                title=s.get("title", "Untitled Story"),
+                description=s.get("description", "A tale from the oral tradition."),
+                imageUrl=s.get("imageUrl", ""),
+                day=s.get("day", 1),
+                month=s.get("month", ""),
+                region=s.get("region", req.region or req.culture),
+            ))
+
+        # Cache for performance
+        _story_cache[cache_key] = stories
+        return stories
+
+    except Exception as e:
+        logger.error(f"Story catalog generation failed: {e}", exc_info=True)
+        # Return a minimal fallback
+        return [
+            StoryCategoryModel(
+                title="The Wisdom of Anansi",
+                description="Anansi the spider outsmarts all the animals "
+                            "to collect the world's wisdom in a pot.",
+                imageUrl="",
+                day=1,
+                month="January",
+                region=req.region or req.culture,
+            )
+        ]
+
+
+# ─── Riddle Game Endpoints ───────────────────────────────────────
+
+# In-memory riddle session store (maps riddle_id → riddle data)
+_active_riddles: dict[str, dict] = {}
+
+
+@router.post("/riddles/generate", response_model=RiddleModel)
+async def generate_riddle(req: GenerateRiddleRequest, request: Request):
+    """
+    Generate a riddle matching Flutter RiddleModel.
+
+    Returns: {id, question, choices: [{text: bool}], tip, help, language}
+    The Flutter app displays 4 choices and the user picks one.
+    """
+    from agents.riddle_agent import RiddleAgent
+
+    gemini_pool = request.app.state.gemini_pool
+    firestore = request.app.state.firestore
+
+    agent = RiddleAgent(gemini_pool)
+    result = await agent.execute({
+        "culture": req.culture,
+        "difficulty": req.difficulty,
+    })
+
+    # Build RiddleModel from agent output
+    riddle = RiddleModel(
+        id=result.get("id", f"riddle_{uuid.uuid4().hex[:8]}"),
+        question=result.get("question", result.get("riddle_text", "")),
+        choices=result.get("choices", []),
+        tip=result.get("tip"),
+        help=result.get("help"),
+        language=result.get("language", req.language),
+    )
+
+    # Store for answer checking
+    _active_riddles[riddle.id] = result
+
+    logger.info(
+        f"Riddle generated: {riddle.id}",
+        extra={"event": "riddle_generated", "culture": req.culture},
+    )
+
+    return riddle
+
+
+@router.post("/riddles/{riddle_id}/answer", response_model=CheckAnswerResponse)
+async def check_riddle_answer(riddle_id: str, req: CheckAnswerRequest):
+    """
+    Check if the selected answer to a riddle is correct.
+
+    The client sends the answer text they selected; we check
+    it against the stored riddle data.
+    """
+    riddle_data = _active_riddles.get(riddle_id)
+    if not riddle_data:
+        raise HTTPException(status_code=404, detail="Riddle not found or expired")
+
+    choices = riddle_data.get("choices", [])
+    correct_answer = ""
+    is_correct = False
+
+    for choice in choices:
+        if isinstance(choice, dict):
+            for text, correct in choice.items():
+                if correct is True:
+                    correct_answer = text
+                if text == req.selected_answer and correct is True:
+                    is_correct = True
+
+    return CheckAnswerResponse(
+        correct=is_correct,
+        correct_answer=correct_answer,
+        explanation=riddle_data.get("explanation", ""),
+    )

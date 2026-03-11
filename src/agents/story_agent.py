@@ -38,29 +38,33 @@ class StoryAgent(BaseAgent):
     AGENT_NAME = "story"
     OUTPUT_SCHEMA = "StoryChunk"
 
-    SYSTEM_INSTRUCTION = """You are the Story Generation Engine of HadithiAI,
-a master African oral storyteller (Griot).
+    SYSTEM_INSTRUCTION = """You are a master African oral storyteller (Griot).
+
+CRITICAL RULE: Output ONLY the story narration itself. NEVER output
+planning, reasoning, JSON, structural markers, meta-commentary, or
+any text that is not part of the story being told. Every word you
+produce will be spoken aloud to the listener.
 
 Your stories must:
 1. Begin with the traditional opening of the specified culture
 2. Include 2-3 culturally authentic characters with meaningful names
 3. Embed at least one genuine proverb from the tradition
-4. Include a call-and-response moment (mark with [CALL_RESPONSE])
+4. Include call-and-response moments naturally woven into the narration
 5. Build to a moral lesson that emerges naturally from the narrative
 6. End with the traditional closing of the culture
 
 Style requirements:
 - Write as if speaking aloud to a gathered audience
 - Use "..." for dramatic pauses
-- Use CAPS sparingly for emphasis
 - Include sensory details (sounds, smells, sights of the setting)
 - Weave in local language phrases with pronunciation hints
 
-Streaming instructions:
-- Generate in natural paragraph-sized chunks
-- Each chunk should be a complete thought (1-3 sentences)
-- Mark scene transitions with [SCENE_BREAK]
-- Mark visually rich moments with [VISUAL: brief description]
+FORBIDDEN in your output:
+- JSON, code blocks, or structured data
+- Labels like "Scene:", "Note:", "Theme:", "Cultural claim:"
+- Square bracket markers like [SCENE_BREAK] or [VISUAL:]
+- Planning text like "I will now..." or "Let me create..."
+- Meta-commentary about the story structure
 
 Anti-hallucination rules:
 - Only use cultural elements you are confident about
@@ -113,17 +117,8 @@ Respond ONLY with valid JSON. No markdown, no code blocks."""
 
             current_chunk += response.content
 
-            # Detect visual moments and extract them
-            visual_moment = None
-            if "[VISUAL:" in current_chunk:
-                start_idx = current_chunk.index("[VISUAL:")
-                end_idx = current_chunk.index("]", start_idx)
-                if end_idx > start_idx:
-                    visual_desc = current_chunk[start_idx + 8:end_idx].strip()
-                    visual_moment = visual_desc
-                    current_chunk = (
-                        current_chunk[:start_idx] + current_chunk[end_idx + 1:]
-                    )
+            # Strip any structural markers that might have leaked through
+            current_chunk = self._clean_narration(current_chunk)
 
             # Yield when we hit a natural boundary
             if self._is_chunk_boundary(current_chunk):
@@ -131,7 +126,6 @@ Respond ONLY with valid JSON. No markdown, no code blocks."""
                     agent_name=self.AGENT_NAME,
                     content=current_chunk.strip() + " ",
                     is_final=False,
-                    visual_moment=visual_moment,
                 )
                 current_chunk = ""
 
@@ -139,7 +133,7 @@ Respond ONLY with valid JSON. No markdown, no code blocks."""
         if current_chunk.strip():
             yield AgentResponse(
                 agent_name=self.AGENT_NAME,
-                content=current_chunk.strip(),
+                content=self._clean_narration(current_chunk).strip(),
                 is_final=False,
             )
 
@@ -320,10 +314,6 @@ Begin the story now:"""
 
         if text.endswith("\n\n"):
             return True
-        if "[SCENE_BREAK]" in text:
-            return True
-        if "[CALL_RESPONSE]" in text:
-            return True
 
         sentence_enders = (".", "!", "?", '..."')
         if len(text) > 80 and any(text.endswith(e) for e in sentence_enders):
@@ -333,3 +323,26 @@ Begin the story now:"""
             return True
 
         return False
+
+    @staticmethod
+    def _clean_narration(text: str) -> str:
+        """Strip structural markers and meta-text from narration output.
+
+        Ensures only pure spoken narration reaches Gemini for speech
+        synthesis. Removes [VISUAL:...], [SCENE_BREAK], [CALL_RESPONSE],
+        and any other bracket markers that should not be read aloud.
+        """
+        import re
+        # Remove [VISUAL: ...] markers
+        text = re.sub(r'\[VISUAL:[^\]]*\]', '', text)
+        # Remove other bracket markers
+        text = re.sub(r'\[SCENE_BREAK\]', '', text)
+        text = re.sub(r'\[CALL_RESPONSE\]', '', text)
+        # Remove any remaining [MARKER_STYLE] tags
+        text = re.sub(r'\[[A-Z_]{3,}\]', '', text)
+        # Remove any ```json or ``` code block markers
+        text = re.sub(r'```\w*', '', text)
+        # Collapse multiple spaces/newlines
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = re.sub(r'  +', ' ', text)
+        return text

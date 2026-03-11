@@ -278,17 +278,21 @@ def _generate_safe_fallback(schema_name: str) -> dict:
             "is_final": True,
         },
         "RiddlePayload": {
-            "opening": "A riddle for you...",
-            "riddle_text": "What has roots that nobody sees, "
-                          "is taller than trees, yet never grows?",
-            "answer": "A mountain",
-            "hints": [
-                "It stands very still.",
-                "It touches the sky.",
-                "You can climb it.",
+            "id": "fallback_riddle",
+            "question": "What has roots that nobody sees, "
+                        "is taller than trees, yet never grows?",
+            "choices": [
+                {"A mountain": True},
+                {"A river": False},
+                {"A tree": False},
+                {"The wind": False},
             ],
-            "explanation": "A classic riddle found in many oral traditions.",
+            "tip": "It stands very still.",
+            "help": "Think of something solid and ancient that reaches "
+                    "toward the sky but never changes.",
+            "language": "en",
             "culture": "african",
+            "explanation": "A classic riddle found in many oral traditions.",
             "is_traditional": False,
         },
         "ImageResult": {

@@ -151,10 +151,17 @@ class TestRiddlePayloadSchema:
 
     def test_valid_riddle(self):
         data = {
-            "opening": "Kitendawili!",
-            "riddle_text": "What has roots nobody sees?",
-            "answer": "A tree",
-            "hints": ["It grows tall", "Birds sit on it", "It is very old"],
+            "id": "riddle_abc123",
+            "question": "What has roots nobody sees?",
+            "choices": [
+                {"A tree": True},
+                {"A river": False},
+                {"The wind": False},
+                {"A cloud": False},
+            ],
+            "tip": "It grows tall",
+            "help": "Think of something rooted in the earth that reaches for the sky.",
+            "language": "Ashanti",
             "culture": "Ashanti",
             "explanation": "A traditional Ashanti nature riddle",
         }
@@ -165,10 +172,14 @@ class TestRiddlePayloadSchema:
             schema_validator.validate_or_reject(
                 "RiddlePayload",
                 {
-                    "opening": "Kitendawili!",
-                    "riddle_text": "What has roots nobody sees?",
-                    "hints": ["a", "b", "c"],
-                    "culture": "Ashanti",
+                    "id": "riddle_abc123",
+                    # Missing "question" — required field
+                    "choices": [
+                        {"A tree": True},
+                        {"A river": False},
+                        {"The wind": False},
+                        {"A cloud": False},
+                    ],
                 },
             )
 

@@ -147,33 +147,52 @@ RIDDLE_REQUEST_SCHEMA = {
 }
 
 # -- RiddlePayload: Riddle Agent output --
+# Updated to match Flutter RiddleModel:
+#   id, question, choices [{text: bool}], tip, help, language
 
 RIDDLE_PAYLOAD_SCHEMA = {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "RiddlePayload",
     "type": "object",
-    "required": ["opening", "riddle_text", "answer", "culture"],
+    "required": ["id", "question", "choices"],
     "properties": {
-        "opening": {
+        "id": {
             "type": "string",
+            "description": "Unique identifier for this riddle",
         },
-        "riddle_text": {
+        "question": {
             "type": "string",
+            "description": "The riddle question text",
         },
-        "answer": {
-            "type": "string",
-        },
-        "hints": {
+        "choices": {
             "type": "array",
-            "items": {"type": "string"},
-            "minItems": 3,
-            "maxItems": 3,
+            "description": "4 answer choices, each mapping answer text to correctness",
+            "items": {
+                "type": "object",
+                "description": "Single choice: {\"answer text\": true/false}",
+            },
+            "minItems": 4,
+            "maxItems": 4,
         },
-        "explanation": {
+        "tip": {
             "type": "string",
+            "description": "A subtle hint",
+        },
+        "help": {
+            "type": "string",
+            "description": "A more detailed hint or explanation",
+        },
+        "language": {
+            "type": "string",
+            "description": "Language/culture code",
         },
         "culture": {
             "type": "string",
+            "description": "The specific African culture",
+        },
+        "explanation": {
+            "type": "string",
+            "description": "Cultural context after answering",
         },
         "is_traditional": {
             "type": "boolean",

@@ -36,6 +36,7 @@ from orchestrator.streaming_controller import StreamingController
 from services.firestore_client import FirestoreClient
 from services.gemini_client import GeminiClientPool, GeminiLiveSession
 from services.memory_manager import MemoryManager
+from services.vad import VoiceActivityDetector
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +206,9 @@ class PrimaryOrchestrator:
         self.memory = MemoryManager(session_id, firestore)
         self.dispatcher = AgentDispatcher(session_id, firestore, gemini_pool)
         self.stream_controller = StreamingController(output_queue, session_id)
+        self.vad = VoiceActivityDetector(
+            sample_rate=settings.AUDIO_SAMPLE_RATE_INPUT
+        )
 
         self._logger = logger.getChild(f"session.{session_id}")
 
@@ -235,13 +239,24 @@ class PrimaryOrchestrator:
         )
 
     async def handle_audio_chunk(self, audio_b64: str, seq: int):
-        """Handle incoming audio chunk from client."""
+        """Handle incoming audio chunk from client.
+
+        Audio is gated by the Voice Activity Detector: only chunks
+        containing human speech are forwarded to Gemini Live.  This
+        prevents ambient noise (fans, traffic, typing) from
+        triggering Gemini's built-in interruption detection.
+        """
+        # ── VAD gate: drop non-speech audio ──
+        is_speech = self.vad.process_audio(audio_b64)
+        if not is_speech:
+            return  # Ambient noise — do not forward
+
         if self.state in (OrchestratorState.IDLE, OrchestratorState.LISTENING):
             self.state = OrchestratorState.LISTENING
             if not self.current_turn_id:
                 self.current_turn_id = f"turn_{uuid.uuid4().hex[:8]}"
 
-        # Forward audio directly to Gemini Live session
+        # Forward speech audio to Gemini Live session
         if self.gemini_session:
             await self.gemini_session.send_audio(audio_b64)
 
@@ -340,6 +355,9 @@ class PrimaryOrchestrator:
 
         # Reset streaming metrics without sending turn_end
         self.stream_controller.reset_metrics()
+
+        # Reset VAD state for clean new turn
+        self.vad.reset()
 
         self.state = OrchestratorState.LISTENING
         self.current_turn_id = f"turn_{uuid.uuid4().hex[:8]}"
@@ -572,8 +590,11 @@ class PrimaryOrchestrator:
                 full_result.append(chunk.content)
             result_text = "".join(full_result)
 
-        # Send the complete result back to Gemini as function response
+        # Send the complete result back to Gemini as function response.
+        # Clean the text to ensure only narration reaches Gemini for
+        # speech synthesis — no JSON, markers, or structural content.
         self._pending_func_call = None
+        result_text = self._clean_tool_response(result_text, func_name)
         if self.gemini_session:
             await self.gemini_session.send_function_response(
                 func_id, func_name, result_text
@@ -632,3 +653,47 @@ class PrimaryOrchestrator:
 
         # Final session save
         await self.memory.finalize_session()
+
+    @staticmethod
+    def _clean_tool_response(text: str, func_name: str) -> str:
+        """Clean agent result text before sending to Gemini as tool_response.
+
+        Strips JSON, structural markers, and meta-commentary so Gemini
+        only receives pure narration text to synthesize into speech.
+        """
+        import re
+
+        if not text or not text.strip():
+            return "The story continues..."
+
+        # If the text looks like JSON, try to extract the narrative
+        cleaned = text.strip()
+        if cleaned.startswith("{") or cleaned.startswith("["):
+            try:
+                import json
+                parsed = json.loads(cleaned)
+                if isinstance(parsed, dict) and "text" in parsed:
+                    cleaned = parsed["text"]
+                elif isinstance(parsed, list):
+                    parts = [
+                        item.get("text", "") for item in parsed
+                        if isinstance(item, dict) and "text" in item
+                    ]
+                    if parts:
+                        cleaned = " ".join(parts)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Strip bracket markers
+        cleaned = re.sub(r'\[VISUAL:[^\]]*\]', '', cleaned)
+        cleaned = re.sub(r'\[[A-Z_]{3,}[^\]]*\]', '', cleaned)
+        # Strip markdown code blocks
+        cleaned = re.sub(r'```\w*\n?', '', cleaned)
+        # Strip JSON-like key-value fragments
+        cleaned = re.sub(r'"cultural_claims"\s*:\s*\[.*?\]', '', cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r'"(culture|scene_description|is_final|category|claim)"\s*:\s*"[^"]*"', '', cleaned)
+        # Collapse whitespace
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+        cleaned = re.sub(r'  +', ' ', cleaned)
+
+        return cleaned.strip() if cleaned.strip() else "The story continues..."
