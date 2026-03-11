@@ -475,40 +475,88 @@ class GeminiClientPool:
         """
         Stream text from Gemini text model (non-Live).
         Used by sub-agents for text generation tasks.
-        """
-        try:
-            from google import genai
-            from google.genai import types
 
-            if not self._text_client:
-                api_key = settings.GEMINI_API_KEY
-                if api_key:
-                    self._text_client = genai.Client(api_key=api_key)
-                else:
-                    self._text_client = genai.Client(
-                        vertexai=True,
-                        project=self.project_id,
-                        location=self.region,
+        Strategy:
+        1. Try Vertex AI first (uses GCP billing, better quotas)
+        2. Fallback to API key if Vertex AI fails
+        3. Retry once on 429 errors with backoff
+        """
+        from google import genai
+        from google.genai import types
+
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            temperature=0.8,
+            top_p=0.95,
+            max_output_tokens=2048,
+        )
+
+        # Try up to 2 client strategies: Vertex AI first, then API key
+        clients_to_try = []
+
+        # Strategy 1: Vertex AI (on Cloud Run, uses service account)
+        if self.project_id and self.region:
+            try:
+                vertex_client = genai.Client(
+                    vertexai=True,
+                    project=self.project_id,
+                    location=self.region,
+                )
+                clients_to_try.append(("vertexai", vertex_client))
+            except Exception as e:
+                self._logger.debug(f"Vertex AI client init failed: {e}")
+
+        # Strategy 2: API key (free tier, may hit quota)
+        api_key = settings.GEMINI_API_KEY
+        if api_key:
+            try:
+                key_client = genai.Client(api_key=api_key)
+                clients_to_try.append(("api_key", key_client))
+            except Exception as e:
+                self._logger.debug(f"API key client init failed: {e}")
+
+        last_error = None
+        for strategy_name, client in clients_to_try:
+            for attempt in range(2):  # retry once on 429
+                try:
+                    response = await client.aio.models.generate_content_stream(
+                        model=settings.GEMINI_TEXT_MODEL,
+                        contents=prompt,
+                        config=config,
                     )
 
-            response = await self._text_client.aio.models.generate_content_stream(
-                model=settings.GEMINI_TEXT_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=0.8,
-                    top_p=0.95,
-                    max_output_tokens=2048,
-                ),
-            )
+                    async for chunk in response:
+                        if chunk.text:
+                            yield chunk.text
 
-            async for chunk in response:
-                if chunk.text:
-                    yield chunk.text
+                    # Success — cache this client for future calls
+                    self._text_client = client
+                    self._logger.debug(
+                        f"Text gen succeeded with {strategy_name}"
+                    )
+                    return  # exit on success
 
-        except Exception as e:
-            self._logger.error(f"Text generation failed: {e}", exc_info=True)
-            yield "[Generation error — please try again]"
+                except Exception as e:
+                    last_error = e
+                    error_str = str(e)
+                    self._logger.warning(
+                        f"Text gen {strategy_name} attempt {attempt+1} failed: "
+                        f"{type(e).__name__}: {error_str[:200]}"
+                    )
+                    # Retry on 429 with backoff
+                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                        if attempt == 0:
+                            import asyncio
+                            await asyncio.sleep(5)
+                            continue
+                    break  # non-retryable error, try next strategy
+
+        # All strategies failed
+        self._logger.error(
+            f"Text generation failed (all strategies): {last_error}",
+            exc_info=True,
+        )
+        yield "[Generation error — please try again]"
 
     async def close_all(self):
         """Close all clients."""

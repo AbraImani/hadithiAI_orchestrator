@@ -278,6 +278,42 @@ async def list_agents():
     }
 
 
+@router.get("/debug/text-gen")
+async def debug_text_generation(request: Request):
+    """
+    Debug endpoint: test Gemini text generation through the pool.
+    Uses the improved strategy (Vertex AI first, then API key).
+    """
+    import traceback
+    gemini_pool = request.app.state.gemini_pool
+    result = {"status": "unknown", "chunks": [], "error": None}
+
+    try:
+        chunks = []
+        async for chunk in gemini_pool.generate_text_stream(
+            prompt="Say hello in exactly 3 words.",
+            system_instruction="Be brief. Respond with exactly 3 words.",
+        ):
+            chunks.append(chunk)
+        result["chunks"] = chunks
+        result["full_text"] = "".join(chunks)
+        if "[Generation error" in result["full_text"]:
+            result["status"] = "generation_error"
+        else:
+            result["status"] = "success"
+    except Exception as e:
+        result["status"] = "exception"
+        result["error"] = f"{type(e).__name__}: {str(e)}"
+        result["traceback"] = traceback.format_exc()
+
+    from core.config import settings
+    result["configured_text_model"] = settings.GEMINI_TEXT_MODEL
+    result["project_id"] = settings.PROJECT_ID
+    result["region"] = settings.REGION
+
+    return result
+
+
 # ─── Story Catalog Endpoints ─────────────────────────────────────
 
 # In-memory cache for generated stories (cleared on restart)
