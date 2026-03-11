@@ -1,6 +1,6 @@
 # HadithiAI Orchestrator — Documentation API
 
-> **Version :** 2.1.0  
+> **Version :** 3.0.0  
 > **URL de base :** `https://hadithiai-orchestrator-292237971535.us-central1.run.app` (production) ou `http://localhost:8080` (dev)  
 > **Protocole :** REST (JSON) + WebSocket (trames JSON)
 
@@ -11,12 +11,15 @@
 1. [Démarrage rapide](#démarrage-rapide)
 2. [Vue d'ensemble de l'architecture](#vue-densemble-de-larchitecture)
 3. [API REST — Gestion des sessions](#api-rest--gestion-des-sessions)
-4. [WebSocket — Communication temps réel](#websocket--communication-temps-réel)
-5. [Spécifications Audio & Vidéo](#spécifications-audio--vidéo)
-6. [Système d'agents](#système-dagents)
-7. [Gestion des erreurs](#gestion-des-erreurs)
-8. [Guide d'intégration Flutter](#guide-dintégration-flutter)
-9. [Configuration](#configuration)
+4. [API REST — Catalogue d'histoires](#api-rest--catalogue-dhistoires)
+5. [API REST — Jeu de devinettes](#api-rest--jeu-de-devinettes)
+6. [WebSocket — Communication temps réel](#websocket--communication-temps-réel)
+7. [Spécifications Audio & Vidéo](#spécifications-audio--vidéo)
+8. [Système d'agents](#système-dagents)
+9. [Modèles de données Flutter](#modèles-de-données-flutter)
+10. [Gestion des erreurs](#gestion-des-erreurs)
+11. [Guide d'intégration Flutter](#guide-dintégration-flutter)
+12. [Configuration](#configuration)
 
 ---
 
@@ -26,7 +29,7 @@ HadithiAI possède **deux canaux de communication** :
 
 | Canal | Endpoint | Rôle |
 |-------|----------|------|
-| **REST** | `/api/v1/*` | Gestion des sessions uniquement (créer, lire, supprimer, historique, préférences) |
+| **REST** | `/api/v1/*` | Gestion des sessions, catalogue d'histoires, jeu de devinettes |
 | **WebSocket** | `/ws` | **TOUTE la communication temps réel** — audio, texte, vidéo, interruptions |
 
 > ⚠️ **Important :** Il n'y a AUCUN endpoint REST pour l'audio ou la vision.  
@@ -35,9 +38,17 @@ HadithiAI possède **deux canaux de communication** :
 ### Flux minimal (3 étapes)
 
 ```
-Étape 1 : POST /api/v1/sessions        → Obtenir un session_id
-Étape 2 : Se connecter au WebSocket     → ws(s)://<host>/ws?session_id=<session_id>
-Étape 3 : Envoyer/recevoir              → audio_chunk, text_input, video_frame via WebSocket
+Étape 1 : POST /api/v1/sessions            → Obtenir un session_id
+Étape 2 : Se connecter au WebSocket         → ws(s)://<host>/ws?session_id=<session_id>
+Étape 3 : Envoyer/recevoir                  → audio_chunk, text_input, video_frame via WebSocket
+```
+
+### Endpoints additionnels (REST)
+
+```
+POST /api/v1/stories/generate      → Générer un catalogue d'histoires (StoryCategoryModel)
+POST /api/v1/riddles/generate       → Générer une devinette à 4 choix (RiddleModel)
+POST /api/v1/riddles/{id}/answer    → Vérifier la réponse d'une devinette
 ```
 
 ---
@@ -57,6 +68,9 @@ graph TD
     B --> B4["GET /sessions/:id/history — Historique"]
     B --> B5["POST /sessions/:id/preferences — Préférences"]
     B --> B6["GET /agents — Liste des agents"]
+    B --> B7["POST /stories/generate — Catalogue"]
+    B --> B8["POST /riddles/generate — Devinette"]
+    B --> B9["POST /riddles/:id/answer — Réponse"]
 
     C --> D["🎯 Orchestrateur"]
 
@@ -74,8 +88,9 @@ graph TD
     style E fill:#EF5350,stroke:#C62828,color:#fff
 ```
 
-> 📌 **REST** = gestion de sessions (pas d'audio, pas de vidéo, pas de streaming)  
-> 📌 **WebSocket** = tout le temps réel (audio bidirectionnel, texte, vidéo, interruptions)
+> 📌 **REST** = gestion de sessions + catalogue d'histoires + jeu de devinettes  
+> 📌 **WebSocket** = tout le temps réel (audio bidirectionnel, texte, vidéo, interruptions)  
+> 📌 **VAD** = Le serveur filtre le bruit ambiant grâce à un Voice Activity Detector — seul l'audio contenant de la parole est transmis à Gemini
 
 ---
 
@@ -267,6 +282,192 @@ curl -X POST https://hadithiai-orchestrator-292237971535.us-central1.run.app/api
   "total": 5
 }
 ```
+
+---
+
+## API REST — Catalogue d'histoires
+
+Ces endpoints permettent à l'application Flutter de générer et afficher un catalogue d'histoires africaines.
+
+### `POST /api/v1/stories/generate` — Générer un catalogue
+
+Génère des entrées de catalogue d'histoires correspondant au modèle Flutter `StoryCategoryModel`.
+
+**Requête :**
+```json
+{
+  "culture": "african",       // optionnel, défaut "african"
+  "region": "east-africa",    // optionnel, défaut ""
+  "count": 5,                 // optionnel, 1-20, défaut 5
+  "language": "fr"            // optionnel, défaut "en"
+}
+```
+
+**Réponse 200 :** `List[StoryCategoryModel]`
+```json
+[
+  {
+    "title": "La Sagesse d'Anansi",
+    "description": "Anansi l'araignée utilise sa ruse pour collecter toute la sagesse du monde dans un pot — mais le proverbe final lui réserve une surprise.",
+    "imageUrl": "",
+    "day": 3,
+    "month": "January",
+    "region": "west-africa"
+  },
+  {
+    "title": "Le Lion et le Lièvre",
+    "description": "Un petit lièvre doit arbitrer un conflit entre le lion et le crocodile — un conte Swahili sur l'intelligence face à la force brute.",
+    "imageUrl": "",
+    "day": 7,
+    "month": "January",
+    "region": "east-africa"
+  }
+]
+```
+
+> 💡 Les résultats sont mis en cache côté serveur par combinaison `culture + region + language + count`. Un redémarrage vide le cache.
+
+**cURL :**
+```bash
+curl -X POST https://hadithiai-orchestrator-292237971535.us-central1.run.app/api/v1/stories/generate \
+  -H "Content-Type: application/json" \
+  -d '{"culture": "african", "region": "west-africa", "count": 5, "language": "fr"}'
+```
+
+---
+
+## API REST — Jeu de devinettes
+
+Ces endpoints gèrent le mini-jeu de devinettes avec 4 choix, conçu pour le `RiddleModel` Flutter.
+
+### `POST /api/v1/riddles/generate` — Générer une devinette
+
+Génère une devinette africaine avec 4 propositions de réponse (1 correcte, 3 incorrectes).
+
+**Requête :**
+```json
+{
+  "culture": "East African",       // optionnel, défaut "East African"
+  "difficulty": "medium",          // optionnel, "easy" | "medium" | "hard"
+  "language": "fr"                 // optionnel, défaut "en"
+}
+```
+
+**Réponse 200 :** `RiddleModel`
+```json
+{
+  "id": "riddle_a3f7b2c1",
+  "question": "Je suis plus grand que Dieu, plus mauvais que le diable. Les pauvres m'ont, les riches en ont besoin. Si tu me manges, tu meurs. Que suis-je ?",
+  "choices": [
+    {"Rien": true},
+    {"L'air": false},
+    {"Le soleil": false},
+    {"L'eau": false}
+  ],
+  "tip": "Pense à ce que les pauvres possèdent déjà...",
+  "help": "C'est un concept abstrait, pas un objet physique.",
+  "language": "fr"
+}
+```
+
+> ⚠️ **Format des choix :** Chaque choix est un objet `{texte: bool}` où `true` = bonne réponse.  
+> Il y a toujours **exactement 4 choix** avec **exactement 1 correct**.  
+> L'`id` retourné est nécessaire pour vérifier la réponse via le endpoint suivant.
+
+**cURL :**
+```bash
+curl -X POST https://hadithiai-orchestrator-292237971535.us-central1.run.app/api/v1/riddles/generate \
+  -H "Content-Type: application/json" \
+  -d '{"culture": "West African", "difficulty": "easy", "language": "fr"}'
+```
+
+---
+
+### `POST /api/v1/riddles/{id}/answer` — Vérifier une réponse
+
+Vérifie si la réponse sélectionnée par l'utilisateur est correcte.
+
+**URL :** `/api/v1/riddles/{riddle_id}/answer`
+
+**Requête :**
+```json
+{
+  "selected_answer": "Rien"
+}
+```
+
+**Réponse 200 :**
+```json
+{
+  "correct": true,
+  "correct_answer": "Rien",
+  "explanation": "La réponse est 'rien' car rien n'est plus grand que Dieu, rien n'est plus mauvais que le diable, les pauvres n'ont rien, les riches n'ont besoin de rien, et si tu manges rien, tu meurs."
+}
+```
+
+**Réponse 404 :**
+```json
+{ "detail": "Riddle not found or expired" }
+```
+
+> 💡 Les devinettes sont stockées en mémoire. Elles expirent au redémarrage du serveur.
+
+**cURL :**
+```bash
+curl -X POST https://hadithiai-orchestrator-292237971535.us-central1.run.app/api/v1/riddles/riddle_a3f7b2c1/answer \
+  -H "Content-Type: application/json" \
+  -d '{"selected_answer": "Rien"}'
+```
+
+---
+
+## Modèles de données Flutter
+
+Ces modèles correspondent exactement aux classes Dart utilisées dans l'application Flutter.
+
+### `StoryCategoryModel`
+
+```dart
+class StoryCategoryModel {
+  final String title;       // Titre de l'histoire
+  final String description; // Description courte (2-3 phrases)
+  final String imageUrl;    // URL de l'illustration (peut être vide)
+  final int day;            // Jour du mois (1-30)
+  final String month;       // Nom du mois
+  final String region;      // Région africaine
+}
+```
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `title` | string | Titre évocateur de l'histoire |
+| `description` | string | Description courte (2-3 phrases) |
+| `imageUrl` | string | URL de l'illustration (peut être `""`) |
+| `day` | int | Jour du mois (1-30) |
+| `month` | string | Nom du mois |
+| `region` | string | Région africaine (ex: `"west-africa"`, `"east-africa"`) |
+
+### `RiddleModel`
+
+```dart
+class RiddleModel {
+  final String id;                       // Identifiant unique
+  final String question;                 // Texte de la devinette
+  final List<Map<String, bool>> choices; // 4 choix: [{texte: true/false}]
+  final String? tip;                     // Indice optionnel
+  final String? help;                    // Aide optionnelle
+  final String? language;                // Langue de la devinette
+}
+```
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `id` | string | Identifiant unique (ex: `"riddle_a3f7b2c1"`) |
+| `question` | string | Texte complet de la devinette |
+| `choices` | array | Exactement 4 objets `{texte: bool}`, 1 seul `true` |
+| `tip` | string? | Indice subtil (optionnel) |
+| `help` | string? | Aide plus directe (optionnel) |
+| `language` | string? | Code langue (ex: `"fr"`, `"en"`, `"sw"`) |
 
 ---
 
@@ -722,6 +923,61 @@ await channel.sink.close();
 await http.delete(Uri.parse('$baseUrl/api/v1/sessions/$sessionId'));
 ```
 
+### Exemple Flutter — Catalogue d'histoires
+
+```dart
+// ─── Générer un catalogue d'histoires ───
+Future<List<StoryCategoryModel>> getStories() async {
+  final response = await http.post(
+    Uri.parse('$baseUrl/api/v1/stories/generate'),
+    headers: {'Content-Type': 'application/json'},
+    body: jsonEncode({
+      'culture': 'african',
+      'region': 'east-africa',
+      'count': 5,
+      'language': 'fr',
+    }),
+  );
+  final List<dynamic> data = jsonDecode(response.body);
+  return data.map((s) => StoryCategoryModel.fromJson(s)).toList();
+}
+```
+
+### Exemple Flutter — Jeu de devinettes
+
+```dart
+// ─── Générer une devinette ───
+Future<RiddleModel> getRiddle() async {
+  final response = await http.post(
+    Uri.parse('$baseUrl/api/v1/riddles/generate'),
+    headers: {'Content-Type': 'application/json'},
+    body: jsonEncode({
+      'culture': 'West African',
+      'difficulty': 'medium',
+      'language': 'fr',
+    }),
+  );
+  return RiddleModel.fromJson(jsonDecode(response.body));
+}
+
+// ─── Vérifier la réponse ───
+Future<bool> checkAnswer(String riddleId, String selectedAnswer) async {
+  final response = await http.post(
+    Uri.parse('$baseUrl/api/v1/riddles/$riddleId/answer'),
+    headers: {'Content-Type': 'application/json'},
+    body: jsonEncode({'selected_answer': selectedAnswer}),
+  );
+  final result = jsonDecode(response.body);
+  if (result['correct']) {
+    print('Bravo ! Bonne réponse !');
+  } else {
+    print('Mauvaise réponse. La bonne réponse était : ${result['correct_answer']}');
+    print('Explication : ${result['explanation']}');
+  }
+  return result['correct'];
+}
+```
+
 ### Résumé pour le développeur Flutter
 
 | Ce que tu veux faire | Comment faire |
@@ -737,6 +993,9 @@ await http.delete(Uri.parse('$baseUrl/api/v1/sessions/$sessionId'));
 | Savoir quand l'IA a fini | WebSocket → écouter le message `turn_end` |
 | Obtenir l'historique | `GET /api/v1/sessions/{id}/history` |
 | Supprimer la session | `DELETE /api/v1/sessions/{id}` |
+| **Générer un catalogue d'histoires** | `POST /api/v1/stories/generate` |
+| **Générer une devinette (4 choix)** | `POST /api/v1/riddles/generate` |
+| **Vérifier une réponse de devinette** | `POST /api/v1/riddles/{id}/answer` |
 
 ---
 
