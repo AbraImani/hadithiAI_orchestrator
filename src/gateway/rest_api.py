@@ -281,12 +281,23 @@ async def list_agents():
 @router.get("/debug/text-gen")
 async def debug_text_generation(request: Request):
     """
-    Debug endpoint: test Gemini text generation through the pool.
-    Uses the improved strategy (Vertex AI first, then API key).
+    Debug endpoint: test Gemini text generation through the pool
+    and directly against both client strategies to expose raw errors.
     """
     import traceback
+    from google import genai
+    from google.genai import types
+    from core.config import settings
+
     gemini_pool = request.app.state.gemini_pool
-    result = {"status": "unknown", "chunks": [], "error": None}
+    result = {
+        "status": "unknown",
+        "chunks": [],
+        "error": None,
+        "pool_result": None,
+        "vertex_direct": {},
+        "apikey_direct": {},
+    }
 
     try:
         chunks = []
@@ -301,12 +312,58 @@ async def debug_text_generation(request: Request):
             result["status"] = "generation_error"
         else:
             result["status"] = "success"
+        result["pool_result"] = result["status"]
     except Exception as e:
         result["status"] = "exception"
         result["error"] = f"{type(e).__name__}: {str(e)}"
         result["traceback"] = traceback.format_exc()
 
-    from core.config import settings
+    # Direct Vertex test
+    try:
+        vertex_client = genai.Client(
+            vertexai=True,
+            project=settings.PROJECT_ID,
+            location=settings.REGION,
+        )
+        resp = await vertex_client.aio.models.generate_content(
+            model=settings.GEMINI_TEXT_MODEL,
+            contents="Say hello in exactly 3 words.",
+            config=types.GenerateContentConfig(
+                system_instruction="Be brief. Respond with exactly 3 words.",
+                max_output_tokens=64,
+            ),
+        )
+        result["vertex_direct"] = {
+            "ok": True,
+            "text": getattr(resp, "text", ""),
+        }
+    except Exception as e:
+        result["vertex_direct"] = {
+            "ok": False,
+            "error": f"{type(e).__name__}: {str(e)}",
+        }
+
+    # Direct API key test
+    try:
+        key_client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        resp = await key_client.aio.models.generate_content(
+            model=settings.GEMINI_TEXT_MODEL,
+            contents="Say hello in exactly 3 words.",
+            config=types.GenerateContentConfig(
+                system_instruction="Be brief. Respond with exactly 3 words.",
+                max_output_tokens=64,
+            ),
+        )
+        result["apikey_direct"] = {
+            "ok": True,
+            "text": getattr(resp, "text", ""),
+        }
+    except Exception as e:
+        result["apikey_direct"] = {
+            "ok": False,
+            "error": f"{type(e).__name__}: {str(e)}",
+        }
+
     result["configured_text_model"] = settings.GEMINI_TEXT_MODEL
     result["project_id"] = settings.PROJECT_ID
     result["region"] = settings.REGION

@@ -491,6 +491,17 @@ class GeminiClientPool:
             max_output_tokens=2048,
         )
 
+        # Vertex and API key do not always expose identical model IDs.
+        # Keep configured model first, then known-compatible fallbacks.
+        base_model = settings.GEMINI_TEXT_MODEL
+        vertex_fallback_models = [
+            base_model,
+            "gemini-2.5-flash",
+            "gemini-1.5-flash-002",
+        ]
+        # Preserve order while removing duplicates
+        vertex_models = list(dict.fromkeys(vertex_fallback_models))
+
         # Try up to 2 client strategies: Vertex AI first, then API key
         clients_to_try = []
 
@@ -517,39 +528,46 @@ class GeminiClientPool:
 
         last_error = None
         for strategy_name, client in clients_to_try:
-            for attempt in range(2):  # retry once on 429
-                try:
-                    response = await client.aio.models.generate_content_stream(
-                        model=settings.GEMINI_TEXT_MODEL,
-                        contents=prompt,
-                        config=config,
-                    )
+            models_to_try = (
+                vertex_models if strategy_name == "vertexai" else [base_model]
+            )
 
-                    async for chunk in response:
-                        if chunk.text:
-                            yield chunk.text
+            # Try model fallbacks for this strategy before switching strategy
+            for model_name in models_to_try:
+                for attempt in range(2):  # retry once on 429
+                    try:
+                        response = await client.aio.models.generate_content_stream(
+                            model=model_name,
+                            contents=prompt,
+                            config=config,
+                        )
 
-                    # Success — cache this client for future calls
-                    self._text_client = client
-                    self._logger.debug(
-                        f"Text gen succeeded with {strategy_name}"
-                    )
-                    return  # exit on success
+                        async for chunk in response:
+                            if chunk.text:
+                                yield chunk.text
 
-                except Exception as e:
-                    last_error = e
-                    error_str = str(e)
-                    self._logger.warning(
-                        f"Text gen {strategy_name} attempt {attempt+1} failed: "
-                        f"{type(e).__name__}: {error_str[:200]}"
-                    )
-                    # Retry on 429 with backoff
-                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                        if attempt == 0:
-                            import asyncio
-                            await asyncio.sleep(5)
-                            continue
-                    break  # non-retryable error, try next strategy
+                        # Success — cache this client for future calls
+                        self._text_client = client
+                        self._logger.debug(
+                            f"Text gen succeeded with {strategy_name} model={model_name}"
+                        )
+                        return  # exit on success
+
+                    except Exception as e:
+                        last_error = e
+                        error_str = str(e)
+                        self._logger.warning(
+                            f"Text gen {strategy_name} model={model_name} "
+                            f"attempt {attempt+1} failed: "
+                            f"{type(e).__name__}: {error_str[:200]}"
+                        )
+                        # Retry on 429 with backoff
+                        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                            if attempt == 0:
+                                import asyncio
+                                await asyncio.sleep(5)
+                                continue
+                        break  # non-retryable error, try next model/strategy
 
         # All strategies failed
         self._logger.error(
