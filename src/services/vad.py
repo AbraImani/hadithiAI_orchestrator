@@ -42,17 +42,32 @@ class VoiceActivityDetector:
     """
 
     # ─── Tunable Parameters ───────────────────────────────────────
-    ENERGY_THRESHOLD = 250       # RMS energy threshold (PCM16 range: 0-32768)
-    ENERGY_THRESHOLD_LOW = 150   # Lower threshold when already speaking (hysteresis)
-    ZCR_MAX = 80                 # Max zero-crossing rate per frame (filters static)
-    SPEECH_FRAMES_TRIGGER = 2    # Consecutive speech frames to start forwarding
-    SILENCE_FRAMES_TRIGGER = 20  # Consecutive silence frames to stop (~600ms)
-    FRAME_DURATION_MS = 30       # Frame size in milliseconds
+    DEFAULT_ENERGY_THRESHOLD = 250       # RMS energy threshold (PCM16 range: 0-32768)
+    DEFAULT_ENERGY_THRESHOLD_LOW = 150   # Lower threshold when already speaking
+    DEFAULT_ZCR_MAX = 80                 # Max zero-crossing rate per frame
+    DEFAULT_SPEECH_FRAMES_TRIGGER = 2    # Consecutive speech frames to start
+    DEFAULT_SILENCE_FRAMES_TRIGGER = 20  # Consecutive silence frames to stop
+    FRAME_DURATION_MS = 30               # Frame size in milliseconds
 
-    def __init__(self, sample_rate: int = 16000):
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        energy_threshold: int = DEFAULT_ENERGY_THRESHOLD,
+        energy_threshold_low: int = DEFAULT_ENERGY_THRESHOLD_LOW,
+        zcr_max: int = DEFAULT_ZCR_MAX,
+        speech_frames_trigger: int = DEFAULT_SPEECH_FRAMES_TRIGGER,
+        silence_frames_trigger: int = DEFAULT_SILENCE_FRAMES_TRIGGER,
+    ):
         self.sample_rate = sample_rate
         self.frame_samples = int(sample_rate * self.FRAME_DURATION_MS / 1000)
         self.frame_bytes = self.frame_samples * 2  # 2 bytes per PCM16 sample
+
+        # Instance-level thresholds (configurable at runtime)
+        self.energy_threshold = energy_threshold
+        self.energy_threshold_low = energy_threshold_low
+        self.zcr_max = zcr_max
+        self.speech_frames_trigger = speech_frames_trigger
+        self.silence_frames_trigger = silence_frames_trigger
 
         # State
         self._buffer = b""
@@ -96,7 +111,7 @@ class VoiceActivityDetector:
                 self._silence_count = 0
                 self._speech_frames_total += 1
 
-                if self._speech_count >= self.SPEECH_FRAMES_TRIGGER:
+                if self._speech_count >= self.speech_frames_trigger:
                     if not self._is_speaking:
                         self._logger.debug(
                             "Speech detected — starting audio forwarding"
@@ -107,7 +122,7 @@ class VoiceActivityDetector:
                 self._silence_count += 1
                 self._speech_count = 0
 
-                if self._silence_count >= self.SILENCE_FRAMES_TRIGGER:
+                if self._silence_count >= self.silence_frames_trigger:
                     if self._is_speaking:
                         self._logger.debug(
                             "Silence detected — stopping audio forwarding"
@@ -142,8 +157,8 @@ class VoiceActivityDetector:
 
         # Use lower threshold if already speaking (hysteresis)
         threshold = (
-            self.ENERGY_THRESHOLD_LOW if self._is_speaking
-            else self.ENERGY_THRESHOLD
+            self.energy_threshold_low if self._is_speaking
+            else self.energy_threshold
         )
 
         if rms < threshold:
@@ -156,7 +171,7 @@ class VoiceActivityDetector:
         )
 
         # Very high ZCR with moderate energy = static/hiss, not speech
-        if zcr > self.ZCR_MAX:
+        if zcr > self.zcr_max:
             return False
 
         return True

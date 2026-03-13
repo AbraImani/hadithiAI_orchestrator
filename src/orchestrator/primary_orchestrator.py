@@ -200,6 +200,7 @@ class PrimaryOrchestrator:
         self._active_tasks: list[asyncio.Task] = []
         self._listener_task: Optional[asyncio.Task] = None
         self._interrupted = False  # suppress stale events after interrupt
+        self._interrupt_at: float = 0.0
         self._pending_func_call: Optional[tuple] = None  # (func_id, func_name)
 
         # Sub-components
@@ -207,7 +208,12 @@ class PrimaryOrchestrator:
         self.dispatcher = AgentDispatcher(session_id, firestore, gemini_pool)
         self.stream_controller = StreamingController(output_queue, session_id)
         self.vad = VoiceActivityDetector(
-            sample_rate=settings.AUDIO_SAMPLE_RATE_INPUT
+            sample_rate=settings.AUDIO_SAMPLE_RATE_INPUT,
+            energy_threshold=settings.VAD_ENERGY_THRESHOLD,
+            energy_threshold_low=settings.VAD_ENERGY_THRESHOLD_LOW,
+            zcr_max=settings.VAD_ZCR_MAX,
+            speech_frames_trigger=settings.VAD_SPEECH_FRAMES_TRIGGER,
+            silence_frames_trigger=settings.VAD_SILENCE_FRAMES_TRIGGER,
         )
 
         self._logger = logger.getChild(f"session.{session_id}")
@@ -250,6 +256,20 @@ class PrimaryOrchestrator:
         is_speech = self.vad.process_audio(audio_b64)
         if not is_speech:
             return  # Ambient noise — do not forward
+
+        # If an interrupt happened recently and Gemini never sent a
+        # turn_complete, force-clear suppression after a short window
+        # so audio-only follow-up turns do not get stuck.
+        if self._interrupted:
+            elapsed = time.time() - self._interrupt_at
+            if elapsed >= settings.INTERRUPT_SUPPRESSION_MAX_SECONDS:
+                self._logger.warning(
+                    "Force-clearing interrupt suppression for new audio turn",
+                    extra={"event": "interrupt_force_clear", "elapsed": elapsed},
+                )
+                self._interrupted = False
+                if self.gemini_session:
+                    self.gemini_session.drain_event_queue()
 
         if self.state in (OrchestratorState.IDLE, OrchestratorState.LISTENING):
             self.state = OrchestratorState.LISTENING
@@ -320,6 +340,7 @@ class PrimaryOrchestrator:
 
         # Tell the listener to drop events until the old turn completes
         self._interrupted = True
+        self._interrupt_at = time.time()
 
         # Cancel active sub-agent tasks
         for task in self._active_tasks:

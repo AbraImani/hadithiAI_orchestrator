@@ -59,6 +59,16 @@ class Settings(BaseSettings):
     STREAM_BUFFER_LOW_WATERMARK: int = 10
     AGENT_TIMEOUT_SECONDS: float = 5.0
 
+    # ── Voice Activity Detection (VAD) ──
+    # Tune these in Cloud Run env vars if interruption/noise behavior
+    # needs adjustment without a code redeploy.
+    VAD_ENERGY_THRESHOLD: int = 320
+    VAD_ENERGY_THRESHOLD_LOW: int = 200
+    VAD_ZCR_MAX: int = 70
+    VAD_SPEECH_FRAMES_TRIGGER: int = 2
+    VAD_SILENCE_FRAMES_TRIGGER: int = 20
+    INTERRUPT_SUPPRESSION_MAX_SECONDS: float = 1.5
+
     # ── Cultural Grounding ──
     CULTURAL_CONFIDENCE_THRESHOLD: float = 0.7
     CULTURAL_REJECT_THRESHOLD: float = 0.4
