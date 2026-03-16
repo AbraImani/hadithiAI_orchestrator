@@ -130,6 +130,24 @@ class CheckAnswerResponse(BaseModel):
 _start_time = time.time()
 
 
+# Gerund-form reasoning section titles emitted by Gemini 2.5 Flash thinking mode.
+_THINKING_SECTION_RE = re.compile(
+    r"\*\*(?:Consider|Craft|Generat|Defin|Refin|Plan|Structur|Evaluat|"
+    r"Analyz|Review|Synthes|Explor|Identif|Assess|Develop|Build|Formulat|"
+    r"Outlin|Creat|Design|Map|Gather|Validat|Select|Execut|Initializ|"
+    r"Process|Describ|Establish|Organiz|Implement|Determin|Prepar)[a-z]*"
+    r"\b[^*\n]*\*\*[^\n]*",
+    re.IGNORECASE,
+)
+# First-person internal-monologue lines produced by thinking models.
+_MONOLOGUE_LINE_RE = re.compile(
+    r"(?im)^(?:I(?:'m| am| will| have| need| want| plan|'ve) now?\b|"
+    r"My goal (?:is|here)\b|The (?:user|model|story) (?:wants|needs|requires)\b|"
+    r"I (?:should|must|can|would|could)\b|Let me (?:now |first |also )?\b|"
+    r"I'(?:ll|d) (?:now |then |also )?\b)[^\n]*$"
+)
+
+
 def _sanitize_story_text(text: str) -> str:
     """Remove model reasoning/thought traces from story fields."""
     if not text:
@@ -140,6 +158,17 @@ def _sanitize_story_text(text: str) -> str:
     # Remove XML-like thought blocks
     cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
     cleaned = re.sub(r"<thought>.*?</thought>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+
+    # Strip Gemini 2.5 Flash thinking section headers
+    # e.g. "**Considering Story Framework**", "**Crafting Initial Story**"
+    cleaned = _THINKING_SECTION_RE.sub("", cleaned)
+
+    # Strip first-person internal-monologue lines
+    cleaned = _MONOLOGUE_LINE_RE.sub("", cleaned)
+
+    # Strip inline tool-call code references the model leaks into text
+    # e.g. tell_story(culture='San', theme='wisdom', complexity='child')
+    cleaned = re.sub(r"\b\w+\([^)]{0,120}\)", "", cleaned)
 
     # Remove common reasoning prefixes/lines
     cleaned = re.sub(

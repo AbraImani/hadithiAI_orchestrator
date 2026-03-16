@@ -484,12 +484,25 @@ class GeminiClientPool:
         from google import genai
         from google.genai import types
 
-        config = types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            temperature=0.8,
-            top_p=0.95,
-            max_output_tokens=2048,
-        )
+        # Try to disable thinking mode (gemini-2.5-flash thinks by default,
+        # outputting reasoning traces as separate thought=True parts).
+        # thinking_budget=0 suppresses all thinking output.
+        try:
+            config = types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.8,
+                top_p=0.95,
+                max_output_tokens=2048,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            )
+        except (AttributeError, TypeError):
+            # Older SDK versions without ThinkingConfig
+            config = types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.8,
+                top_p=0.95,
+                max_output_tokens=2048,
+            )
 
         # Vertex and API key do not always expose identical model IDs.
         # Keep configured model first, then known-compatible fallbacks.
@@ -543,7 +556,25 @@ class GeminiClientPool:
                         )
 
                         async for chunk in response:
-                            if chunk.text:
+                            # Filter out thought/reasoning parts.
+                            # Gemini 2.5 Flash emits thinking as parts with
+                            # thought=True — skip those, yield only real text.
+                            have_content = False
+                            candidates = getattr(chunk, 'candidates', None)
+                            if candidates:
+                                for candidate in candidates:
+                                    content = getattr(candidate, 'content', None)
+                                    if content:
+                                        parts = getattr(content, 'parts', None)
+                                        if parts:
+                                            for part in parts:
+                                                if not getattr(part, 'thought', False):
+                                                    part_text = getattr(part, 'text', None)
+                                                    if part_text:
+                                                        have_content = True
+                                                        yield part_text
+                            # Fallback for SDK versions without .candidates
+                            if not have_content and chunk.text:
                                 yield chunk.text
 
                         # Success — cache this client for future calls

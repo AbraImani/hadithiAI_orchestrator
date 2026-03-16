@@ -8,6 +8,7 @@ Streams stories paragraph-by-paragraph for natural pacing.
 
 import json
 import logging
+import re
 from typing import AsyncIterator
 
 from agents.base_agent import BaseAgent
@@ -281,7 +282,6 @@ Begin the story now:"""
                 chunks = [parsed]
         except json.JSONDecodeError:
             # Try to find JSON objects in the text
-            import re
             json_pattern = re.compile(r'\{[^{}]*\}', re.DOTALL)
             matches = json_pattern.findall(cleaned)
             for match in matches:
@@ -328,18 +328,44 @@ Begin the story now:"""
 
         return False
 
+    # Gemini 2.5 Flash thinking section headers (bold gerund phrases)
+    _THINKING_SECTION_RE = re.compile(
+        r"\*\*(?:Consider|Craft|Generat|Defin|Refin|Plan|Structur|Evaluat|"
+        r"Analyz|Review|Synthes|Explor|Identif|Assess|Develop|Build|Formulat|"
+        r"Outlin|Creat|Design|Map|Gather|Validat|Select|Execut|Initializ|"
+        r"Process|Describ|Establish|Organiz|Implement|Determin|Prepar)[a-z]*"
+        r"\b[^*\n]*\*\*[^\n]*",
+        re.IGNORECASE,
+    )
+    _MONOLOGUE_LINE_RE = re.compile(
+        r"(?im)^(?:I(?:'m| am| will| have| need| want| plan|'ve) now?\b|"
+        r"My goal (?:is|here)\b|The (?:user|model|story) (?:wants|needs|requires)\b|"
+        r"I (?:should|must|can|would|could)\b|Let me (?:now |first |also )?\b|"
+        r"I'(?:ll|d) (?:now |then |also )?\b)[^\n]*$"
+    )
+
     @staticmethod
     def _clean_narration(text: str) -> str:
         """Strip structural markers and meta-text from narration output.
 
         Ensures only pure spoken narration reaches Gemini for speech
         synthesis. Removes [VISUAL:...], [SCENE_BREAK], [CALL_RESPONSE],
-        and any other bracket markers that should not be read aloud.
+        Gemini 2.5 Flash thinking sections, and any other markers that
+        should not be read aloud.
         """
-        import re
         # Remove XML-like thought blocks
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r'<thought>.*?</thought>', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+        # Strip Gemini 2.5 Flash bold thinking section headers
+        # e.g. "**Considering Story Framework**", "**Crafting Initial Story**"
+        text = StoryAgent._THINKING_SECTION_RE.sub('', text)
+
+        # Strip first-person internal-monologue lines
+        text = StoryAgent._MONOLOGUE_LINE_RE.sub('', text)
+
+        # Strip inline tool-call code references leaked into narration
+        text = re.sub(r'\b\w+\([^)]{0,120}\)', '', text)
 
         # Remove common reasoning/meta lines that should never be spoken
         text = re.sub(
