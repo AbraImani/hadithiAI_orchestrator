@@ -20,6 +20,7 @@ Endpoints:
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from typing import Optional, List
@@ -127,6 +128,70 @@ class CheckAnswerResponse(BaseModel):
 # ─── Module state ─────────────────────────────────────────────────
 
 _start_time = time.time()
+
+
+def _sanitize_story_text(text: str) -> str:
+    """Remove model reasoning/thought traces from story fields."""
+    if not text:
+        return ""
+
+    cleaned = text.strip()
+
+    # Remove XML-like thought blocks
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"<thought>.*?</thought>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+
+    # Remove common reasoning prefixes/lines
+    cleaned = re.sub(
+        r"(?im)^\s*(thought|reasoning|analysis|chain\s*of\s*thought|internal\s*monologue)\s*:\s*.*$",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(r"(?im)^\s*let'?s\s+think\b.*$", "", cleaned)
+    cleaned = re.sub(r"(?im)^\s*i\s+should\b.*$", "", cleaned)
+
+    # Remove markdown/code fences and collapse whitespace
+    cleaned = re.sub(r"```\w*", "", cleaned)
+    cleaned = re.sub(r"(?is)<\s*/?analysis\s*>", "", cleaned)
+    cleaned = re.sub(r"(?is)<\s*/?reasoning\s*>", "", cleaned)
+    cleaned = re.sub(r"(?im)^\s*(scratchpad|deliberation|notes?)\s*:\s*.*$", "", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+
+    return cleaned.strip()
+
+
+def _extract_json_array(text: str) -> str:
+    """Extract the first balanced top-level JSON array from text."""
+    start = text.find("[")
+    if start < 0:
+        return ""
+
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+
+    return ""
 
 
 # ─── Endpoints ────────────────────────────────────────────────────
@@ -410,10 +475,15 @@ Requirements:
 - Titles should be evocative and culturally authentic
 - Descriptions should make the reader want to hear the story
 - Distribute days across the month
+- Absolutely forbidden: reasoning traces, thought process, analysis text, planning notes, XML tags like <think>, markdown
 
 Respond ONLY with a valid JSON array. No markdown, no code blocks."""
 
-    system = "You are a story catalog generator. Output only valid JSON arrays."
+    system = (
+        "You are a story catalog generator. "
+        "Output only valid JSON arrays with user-facing story content. "
+        "Never include reasoning, thought traces, or internal analysis."
+    )
 
     try:
         result_parts = []
@@ -426,10 +496,18 @@ Respond ONLY with a valid JSON array. No markdown, no code blocks."""
         # Parse JSON
         import json
         cleaned = raw.strip()
+        cleaned = _sanitize_story_text(cleaned)
         if cleaned.startswith("```"):
             lines = cleaned.split("\n")
             lines = [l for l in lines if not l.strip().startswith("```")]
             cleaned = "\n".join(lines).strip()
+
+        # If the model wrapped JSON in extra text/reasoning, extract first
+        # balanced top-level array safely.
+        if not cleaned.startswith("["):
+            extracted = _extract_json_array(cleaned)
+            if extracted:
+                cleaned = extracted
 
         stories_data = json.loads(cleaned)
         if not isinstance(stories_data, list):
@@ -437,13 +515,31 @@ Respond ONLY with a valid JSON array. No markdown, no code blocks."""
 
         stories = []
         for s in stories_data[:req.count]:
+            title = _sanitize_story_text(str(s.get("title", "Untitled Story")))
+            description = _sanitize_story_text(
+                str(s.get("description", "A tale from the oral tradition."))
+            )
+
+            # Safety fallback if output is still contaminated by reasoning traces
+            if re.search(r"(?i)\b(thought|reasoning|analysis|chain of thought)\b", f"{title} {description}"):
+                title = "Untitled Story"
+                description = "A tale from the oral tradition."
+
+            day = s.get("day", 1)
+            if not isinstance(day, int):
+                try:
+                    day = int(day)
+                except Exception:
+                    day = 1
+            day = max(1, min(day, 30))
+
             stories.append(StoryCategoryModel(
-                title=s.get("title", "Untitled Story"),
-                description=s.get("description", "A tale from the oral tradition."),
+                title=title,
+                description=description,
                 imageUrl=s.get("imageUrl", ""),
-                day=s.get("day", 1),
-                month=s.get("month", ""),
-                region=s.get("region", req.region or req.culture),
+                day=day,
+                month=_sanitize_story_text(str(s.get("month", ""))),
+                region=_sanitize_story_text(str(s.get("region", req.region or req.culture))),
             ))
 
         # Cache for performance

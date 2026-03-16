@@ -186,7 +186,9 @@ Respond ONLY with valid JSON. No markdown, no code blocks."""
 
         if chunks:
             # Merge all chunks into one
-            merged_text = " ".join(c.get("text", "") for c in chunks)
+            merged_text = " ".join(
+                self._clean_narration(c.get("text", "")) for c in chunks
+            )
             all_claims = []
             for c in chunks:
                 all_claims.extend(c.get("cultural_claims", []))
@@ -292,14 +294,16 @@ Begin the story now:"""
 
         # If no valid JSON found, wrap raw text as a single chunk
         if not chunks:
+            cleaned = self._clean_narration(raw_text)
             chunks = [{
-                "text": raw_text.strip() if raw_text.strip() else "The story begins...",
+                "text": cleaned.strip() if cleaned.strip() else "The story begins...",
                 "culture": default_culture,
                 "cultural_claims": [],
             }]
 
         # Ensure all chunks have required fields
         for chunk in chunks:
+            chunk["text"] = self._clean_narration(str(chunk.get("text", "")))
             chunk.setdefault("culture", default_culture)
             chunk.setdefault("cultural_claims", [])
 
@@ -333,6 +337,19 @@ Begin the story now:"""
         and any other bracket markers that should not be read aloud.
         """
         import re
+        # Remove XML-like thought blocks
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<thought>.*?</thought>', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+        # Remove common reasoning/meta lines that should never be spoken
+        text = re.sub(
+            r'(?im)^\s*(thought|reasoning|analysis|chain\s*of\s*thought|internal\s*monologue)\s*:\s*.*$',
+            '',
+            text,
+        )
+        text = re.sub(r"(?im)^\s*let'?s\s+think\b.*$", '', text)
+        text = re.sub(r'(?im)^\s*i\s+should\b.*$', '', text)
+
         # Remove [VISUAL: ...] markers
         text = re.sub(r'\[VISUAL:[^\]]*\]', '', text)
         # Remove other bracket markers
