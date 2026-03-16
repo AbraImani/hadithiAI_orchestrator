@@ -99,7 +99,9 @@ async def websocket_endpoint(
                     "id": session_data.get("story_id", ""),
                     "title": session_data.get("story_title", ""),
                     "summary": session_data.get("story_summary", ""),
+                    "region": session_data.get("region_pref", ""),
                     "language": session_data.get("language_pref", ""),
+                    "content": session_data.get("story_content", ""),
                 }
         except Exception as ctx_err:
             # Non-fatal — continue without injecting story context

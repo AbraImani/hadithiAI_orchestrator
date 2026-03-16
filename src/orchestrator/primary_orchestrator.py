@@ -222,33 +222,52 @@ class PrimaryOrchestrator:
         """Initialize the orchestrator and open Gemini Live session.
 
         Args:
-            story_context: Optional dict with keys id, title, summary, language.
+            story_context: Optional dict with keys id, title, summary,
+                           region, language, and content.
                            When provided the Live session system instruction is
                            extended so the Griot knows which story to narrate.
         """
         start = time.time()
 
-        # Create session in Firestore
-        await self.memory.create_session()
+        # Preserve metadata created by REST /sessions (story context,
+        # region/language preferences). Only create if missing.
+        existing = await self.firestore.get_session(self.session_id)
+        if existing:
+            await self.memory.load_session(self.session_id)
+        else:
+            await self.memory.create_session()
 
         # Build system instruction — inject story context when provided
         system_instruction = SYSTEM_INSTRUCTION
         if story_context and (story_context.get("title") or story_context.get("summary")):
             title = story_context.get("title", "")
             summary = story_context.get("summary", "")
+            region = story_context.get("region", "")
             language = story_context.get("language", "")
+            story_content = story_context.get("content", "")
             story_block = (
                 f"\n\nACTIVE STORY CONTEXT:\n"
                 f"The user has opened the story titled \"{title}\".\n"
             )
             if summary:
                 story_block += f"Story summary: {summary}\n"
+            if region:
+                story_block += f"Story region: {region}\n"
             if language:
                 story_block += f"Narrate in language: {language}\n"
+            if story_content:
+                story_block += (
+                    "Authoritative story text (use this exact narrative as the "
+                    "source when narrating this day story):\n"
+                    f"{story_content}\n"
+                )
             story_block += (
                 "When the user asks you to start, continue, or read the story, "
                 "narrate exactly this story using your Griot voice. "
-                "Do not invent a different story."
+                "Do not invent a different story. The user may also ask "
+                "questions, clarifications, or discussion points about this "
+                "same story; answer conversationally while staying grounded "
+                "in this story context."
             )
             system_instruction = SYSTEM_INSTRUCTION + story_block
             self._logger.info(

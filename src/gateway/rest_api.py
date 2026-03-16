@@ -21,6 +21,8 @@ Endpoints:
 """
 
 import asyncio
+import base64
+import html
 import logging
 import re
 import time
@@ -55,6 +57,7 @@ class CreateSessionRequest(BaseModel):
     story_id: Optional[str] = None
     story_title: Optional[str] = None
     story_summary: Optional[str] = None
+    story_content: Optional[str] = None
 
 
 class CreateSessionResponse(BaseModel):
@@ -142,6 +145,7 @@ class DayStoryRequest(BaseModel):
     title: str = Field(..., description="Story title")
     summary: str = Field(..., description="Short summary / teaser")
     language: str = Field(default="fr", description="Language code, e.g. 'fr', 'en', 'sw'")
+    region: str = Field(default="african", description="African region/culture context")
 
 
 class DayStoryContentResponse(BaseModel):
@@ -255,6 +259,28 @@ def _extract_json_array(text: str) -> str:
     return ""
 
 
+def _build_daystory_image_fallback(req: DayStoryRequest) -> str:
+    """Return a lightweight SVG data URL fallback when image generation fails."""
+    title = html.escape(req.title[:80])
+    summary = html.escape(req.summary[:180])
+    region = html.escape(req.region)
+    svg = (
+        "<svg xmlns='http://www.w3.org/2000/svg' width='1280' height='720' viewBox='0 0 1280 720'>"
+        "<defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>"
+        "<stop offset='0%' stop-color='#2f5f4f'/><stop offset='100%' stop-color='#d19f5f'/>"
+        "</linearGradient></defs>"
+        "<rect width='1280' height='720' fill='url(#g)'/>"
+        "<rect x='64' y='64' width='1152' height='592' rx='24' fill='rgba(255,255,255,0.88)'/>"
+        "<text x='110' y='180' font-size='52' font-family='Georgia, serif' fill='#2a2a2a'>HadithiAI Story</text>"
+        f"<text x='110' y='260' font-size='42' font-family='Georgia, serif' fill='#1f3f35'>{title}</text>"
+        f"<text x='110' y='340' font-size='28' font-family='Verdana, sans-serif' fill='#3d3d3d'>{summary}</text>"
+        f"<text x='110' y='620' font-size='24' font-family='Verdana, sans-serif' fill='#4a4a4a'>Inspired by {region}</text>"
+        "</svg>"
+    )
+    b64 = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return f"data:image/svg+xml;base64,{b64}"
+
+
 # ─── Endpoints ────────────────────────────────────────────────────
 
 @router.post("/sessions", response_model=CreateSessionResponse)
@@ -282,6 +308,14 @@ async def create_session(req: CreateSessionRequest, request: Request):
         session_meta["story_title"] = req.story_title
     if req.story_summary:
         session_meta["story_summary"] = req.story_summary
+    if req.story_content:
+        session_meta["story_content"] = req.story_content
+    # If Flutter sends only story_id/title/summary, reuse previously generated
+    # daystory content when present so Live narration matches exactly.
+    if req.story_id and "story_content" not in session_meta:
+        cached_story = _daystory_content_cache.get(req.story_id)
+        if cached_story and cached_story.content:
+            session_meta["story_content"] = cached_story.content
 
     await firestore.create_session(session_id, session_meta)
 
@@ -648,7 +682,7 @@ async def get_daystory_content(req: DayStoryRequest, request: Request):
     """
     Generate the full story narration for a given story.
 
-    Flutter sends {id, title, summary, language}; this endpoint returns
+    Flutter sends {id, title, summary, language, region}; this endpoint returns
     the complete narrative text.  The same text is used as context by
     the Live audio session so the Griot narrates exactly this story.
 
@@ -665,9 +699,11 @@ async def get_daystory_content(req: DayStoryRequest, request: Request):
         f"narration that will be spoken aloud to a listener.\n\n"
         f"Title: {req.title}\n"
         f"Summary: {req.summary}\n"
-        f"Language: {req.language}\n\n"
+        f"Language: {req.language}\n"
+        f"Region: {req.region}\n\n"
         f"Rules:\n"
-        f"- Write in {req.language}\n"
+        f"- Write in language: {req.language}\n"
+        f"- Keep it grounded in the region/cultural context: {req.region}\n"
         f"- Use the oral tradition style: warm, rhythmic, culturally authentic\n"
         f"- Begin with the traditional opening of the relevant culture\n"
         f"- Include the moral lesson naturally at the end\n"
@@ -710,7 +746,7 @@ async def get_daystory_image(req: DayStoryRequest, request: Request):
     """
     Generate the story illustration for a given story.
 
-    Flutter sends {id, title, summary, language}; this endpoint returns
+    Flutter sends {id, title, summary, language, region}; this endpoint returns
     the image URL (Cloud Storage) or base64 data URL as fallback.
 
     Responses are cached by story id — subsequent calls are instant.
@@ -731,7 +767,7 @@ async def get_daystory_image(req: DayStoryRequest, request: Request):
     try:
         url = await agent.generate_image(
             scene_description=scene,
-            culture="African",
+            culture=req.region,
             aspect_ratio="16:9",
         )
 
@@ -740,7 +776,7 @@ async def get_daystory_image(req: DayStoryRequest, request: Request):
         elif url:
             result = DayStoryImageResponse(id=req.id, image_url=url)
         else:
-            result = DayStoryImageResponse(id=req.id)
+            result = DayStoryImageResponse(id=req.id, image_base64=_build_daystory_image_fallback(req))
 
         _daystory_image_cache[req.id] = result
 
@@ -752,8 +788,8 @@ async def get_daystory_image(req: DayStoryRequest, request: Request):
 
     except Exception as e:
         logger.error(f"DayStory image generation failed: {e}", exc_info=True)
-        # Return empty rather than 500 — image is optional, story still works
-        return DayStoryImageResponse(id=req.id)
+        # Always return an image payload so Flutter has a renderable asset.
+        return DayStoryImageResponse(id=req.id, image_base64=_build_daystory_image_fallback(req))
 
 
 # ─── Riddle Game Endpoints ───────────────────────────────────────
