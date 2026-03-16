@@ -229,13 +229,10 @@ class PrimaryOrchestrator:
         """
         start = time.time()
 
-        # Preserve metadata created by REST /sessions (story context,
-        # region/language preferences). Only create if missing.
-        existing = await self.firestore.get_session(self.session_id)
-        if existing:
-            await self.memory.load_session(self.session_id)
-        else:
-            await self.memory.create_session()
+        # Always start fresh in-memory session state for this connection.
+        # Story context is injected via the system instruction below,
+        # not by loading Firestore metadata into SessionMetadata.
+        await self.memory.create_session()
 
         # Build system instruction — inject story context when provided
         system_instruction = SYSTEM_INSTRUCTION
