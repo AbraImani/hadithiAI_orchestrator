@@ -235,37 +235,42 @@ class PrimaryOrchestrator:
         await self.memory.create_session()
 
         # Build system instruction — inject story context when provided.
-        # IMPORTANT: do NOT inject the full story_content text here.
-        # Putting a 400-700 word story script in the system instruction
-        # causes the model to monologue the entire story immediately on
-        # connect, killing all call-and-response interactivity.
-        # We pass only the identity (title, summary, region) so the Griot
-        # knows WHICH story to tell but generates it live and interactively.
+        # Pass the complete story_content as a REFERENCE (not a script to read immediately).
+        # The story is presented as authoritative source material you know well,
+        # not as something to monologue. You engage with the user naturally,
+        # weaving this story into the conversation as appropriate.
         system_instruction = SYSTEM_INSTRUCTION
         if story_context and (story_context.get("title") or story_context.get("summary")):
             title = story_context.get("title", "")
             summary = story_context.get("summary", "")
             region = story_context.get("region", "")
             language = story_context.get("language", "")
+            story_content = story_context.get("content", "")
             story_block = (
-                f"\n\nACTIVE STORY SESSION:\n"
-                f"The user has opened the story: \"{title}\".\n"
+                f"\n\nACTIVE STORY CONTEXT:\n"
+                f"Story title: \"{title}\"\n"
             )
             if summary:
-                story_block += f"Plot seed: {summary}\n"
+                story_block += f"Summary: {summary}\n"
             if region:
-                story_block += f"Cultural setting: {region}\n"
+                story_block += f"Cultural origin: {region}\n"
             if language:
-                story_block += f"Speak in: {language}\n"
+                story_block += f"Preferred language: {language}\n"
+            
+            if story_content:
+                story_block += (
+                    f"\nFull story reference (know this story well):\n"
+                    f"{story_content}\n\n"
+                )
+            
             story_block += (
-                "\nINSTRUCTIONS FOR THIS SESSION:\n"
-                "- Wait for the user to greet you or ask you to start before narrating.\n"
-                "- Tell THIS specific story (title above) when asked — do not switch to a different tale.\n"
-                "- Use the plot seed above to guide the narrative; generate the full story yourself in your Griot voice.\n"
-                "- Narrate in short, breathable segments (2-4 sentences), then PAUSE and invite the listener to respond.\n"
-                "- Use traditional call-and-response (e.g. 'Are you with me?', 'What do you think happened next?').\n"
-                "- Answer questions, clarifications, and discussion about this story conversationally.\n"
-                "- Never recite a pre-written script; tell the story live as a true oral tradition.\n"
+                "INTERACTION GUIDELINES:\n"
+                "- You know this story deeply and can discuss, elaborate, or narrate it naturally.\n"
+                "- Respond genuinely to the user's questions, comments, and engagement.\n"
+                "- Do NOT recite the story passively or monologue it all at once.\n"
+                "- Instead, tell it dynamically through conversation — as the user engages, you unfold the tale.\n"
+                "- Keep naturally interactive: if the user speaks, acknowledge them, listen, and respond before continuing.\n"
+                "- Use the story as context for rich, authentic storytelling, not as a script.\n"
             )
             system_instruction = SYSTEM_INSTRUCTION + story_block
             self._logger.info(
