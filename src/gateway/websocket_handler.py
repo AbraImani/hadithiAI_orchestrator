@@ -87,13 +87,31 @@ async def websocket_endpoint(
     try:
         # ── Initialize orchestrator ──
         app = websocket.app
+
+        # Read story context stored by POST /sessions (if any).
+        # This is used to inject the active story into the Live system prompt
+        # so the Griot knows which specific story to narrate.
+        story_context: Optional[dict] = None
+        try:
+            session_data = await app.state.firestore.get_session(session_id)
+            if session_data and session_data.get("story_id"):
+                story_context = {
+                    "id": session_data.get("story_id", ""),
+                    "title": session_data.get("story_title", ""),
+                    "summary": session_data.get("story_summary", ""),
+                    "language": session_data.get("language_pref", ""),
+                }
+        except Exception as ctx_err:
+            # Non-fatal — continue without injecting story context
+            logger.debug(f"Could not read story context: {ctx_err}")
+
         conn.orchestrator = PrimaryOrchestrator(
             session_id=session_id,
             firestore=app.state.firestore,
             gemini_pool=app.state.gemini_pool,
             output_queue=conn.output_queue,
         )
-        await conn.orchestrator.initialize()
+        await conn.orchestrator.initialize(story_context=story_context)
 
         # ── Register connection ──
         active_connections[session_id] = conn

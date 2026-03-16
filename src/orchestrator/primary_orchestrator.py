@@ -218,16 +218,47 @@ class PrimaryOrchestrator:
 
         self._logger = logger.getChild(f"session.{session_id}")
 
-    async def initialize(self):
-        """Initialize the orchestrator and open Gemini Live session."""
+    async def initialize(self, story_context: Optional[dict] = None):
+        """Initialize the orchestrator and open Gemini Live session.
+
+        Args:
+            story_context: Optional dict with keys id, title, summary, language.
+                           When provided the Live session system instruction is
+                           extended so the Griot knows which story to narrate.
+        """
         start = time.time()
 
         # Create session in Firestore
         await self.memory.create_session()
 
+        # Build system instruction — inject story context when provided
+        system_instruction = SYSTEM_INSTRUCTION
+        if story_context and (story_context.get("title") or story_context.get("summary")):
+            title = story_context.get("title", "")
+            summary = story_context.get("summary", "")
+            language = story_context.get("language", "")
+            story_block = (
+                f"\n\nACTIVE STORY CONTEXT:\n"
+                f"The user has opened the story titled \"{title}\".\n"
+            )
+            if summary:
+                story_block += f"Story summary: {summary}\n"
+            if language:
+                story_block += f"Narrate in language: {language}\n"
+            story_block += (
+                "When the user asks you to start, continue, or read the story, "
+                "narrate exactly this story using your Griot voice. "
+                "Do not invent a different story."
+            )
+            system_instruction = SYSTEM_INSTRUCTION + story_block
+            self._logger.info(
+                f"Story context injected: '{title}'",
+                extra={"event": "story_context_injected"},
+            )
+
         # Acquire a Gemini Live session from the pool
         self.gemini_session = await self.gemini_pool.acquire(
-            system_instruction=SYSTEM_INSTRUCTION,
+            system_instruction=system_instruction,
             tools=TOOL_DECLARATIONS,
         )
 
@@ -708,6 +739,17 @@ class PrimaryOrchestrator:
         # Strip bracket markers
         cleaned = re.sub(r'\[VISUAL:[^\]]*\]', '', cleaned)
         cleaned = re.sub(r'\[[A-Z_]{3,}[^\]]*\]', '', cleaned)
+        # Strip XML-like thought traces
+        cleaned = re.sub(r'<think>.*?</think>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r'<thought>.*?</thought>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+        # Strip explicit reasoning/meta lines
+        cleaned = re.sub(
+            r'(?im)^\s*(thought|reasoning|analysis|chain\s*of\s*thought|internal\s*monologue)\s*:\s*.*$',
+            '',
+            cleaned,
+        )
+        cleaned = re.sub(r"(?im)^\s*let'?s\s+think\b.*$", '', cleaned)
+        cleaned = re.sub(r'(?im)^\s*i\s+should\b.*$', '', cleaned)
         # Strip markdown code blocks
         cleaned = re.sub(r'```\w*\n?', '', cleaned)
         # Strip JSON-like key-value fragments

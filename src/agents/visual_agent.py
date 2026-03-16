@@ -158,9 +158,9 @@ class VisualGenerationAgent:
             if url:
                 return url
 
-            # Fallback: return base64 data URL if storage upload fails
+            # Fallback: return full base64 data URL when storage upload fails
             b64 = base64.b64encode(image_bytes).decode("utf-8")
-            return f"data:image/png;base64,{b64[:100]}..."  # Truncated for logging
+            return f"data:image/png;base64,{b64}"
 
         except ImportError as e:
             self.logger.warning(f"GenAI SDK import error: {e}")

@@ -14,6 +14,8 @@ Endpoints:
   GET    /api/v1/health                → Detailed health check
   GET    /api/v1/agents                → List available agent capabilities
   POST   /api/v1/stories/generate      → Generate story catalog entries
+  POST   /api/v1/stories/daystory      → Generate full story narration (content only)
+  POST   /api/v1/stories/daystory/image → Generate story illustration (image only)
   POST   /api/v1/riddles/generate      → Generate a riddle (RiddleModel)
   POST   /api/v1/riddles/{id}/answer   → Check a riddle answer
 """
@@ -48,6 +50,11 @@ class CreateSessionRequest(BaseModel):
     language: str = "en"
     region: Optional[str] = None
     age_group: str = "adult"
+    # Optional story context — when set, the Live audio session will
+    # narrate this specific story when the user starts talking.
+    story_id: Optional[str] = None
+    story_title: Optional[str] = None
+    story_summary: Optional[str] = None
 
 
 class CreateSessionResponse(BaseModel):
@@ -123,6 +130,31 @@ class CheckAnswerResponse(BaseModel):
     correct: bool
     correct_answer: str
     explanation: str = ""
+
+
+class DayStoryRequest(BaseModel):
+    """Request to generate or retrieve day-story content/image.
+
+    These 4 fields come from the Flutter StoryModel and identify
+    the story. The backend uses them to generate content and/or image.
+    """
+    id: str = Field(..., description="Story id from Flutter StoryModel")
+    title: str = Field(..., description="Story title")
+    summary: str = Field(..., description="Short summary / teaser")
+    language: str = Field(default="fr", description="Language code, e.g. 'fr', 'en', 'sw'")
+
+
+class DayStoryContentResponse(BaseModel):
+    """Full story narrative returned by POST /stories/daystory."""
+    id: str
+    content: str  # Complete narration text — used by Live session too
+
+
+class DayStoryImageResponse(BaseModel):
+    """Story illustration returned by POST /stories/daystory/image."""
+    id: str
+    image_url: str = ""   # Cloud Storage public URL when available
+    image_base64: str = ""  # data:image/png;base64,... fallback
 
 
 # ─── Module state ─────────────────────────────────────────────────
@@ -237,11 +269,21 @@ async def create_session(req: CreateSessionRequest, request: Request):
 
     # Persist initial session metadata
     firestore = request.app.state.firestore
-    await firestore.create_session(session_id, {
+    # Persist initial session metadata (include story context if provided
+    # so the WebSocket handler can inject it into the Live system prompt).
+    session_meta: dict = {
         "language_pref": req.language,
         "region_pref": req.region,
         "age_group": req.age_group,
-    })
+    }
+    if req.story_id:
+        session_meta["story_id"] = req.story_id
+    if req.story_title:
+        session_meta["story_title"] = req.story_title
+    if req.story_summary:
+        session_meta["story_summary"] = req.story_summary
+
+    await firestore.create_session(session_id, session_meta)
 
     # Build WebSocket URL relative to the server
     host = request.headers.get("host", "localhost:8080")
@@ -589,6 +631,129 @@ Respond ONLY with a valid JSON array. No markdown, no code blocks."""
                 region=req.region or req.culture,
             )
         ]
+
+
+# ─── Day Story Endpoints ─────────────────────────────────────────
+# These two endpoints are intentionally separate so Flutter can call
+# them in parallel: one for narrative text, one for illustration.
+# Flutter provides the story identity; the backend generates only content.
+
+# In-memory caches keyed by story id (cleared on restart / cold start)
+_daystory_content_cache: dict[str, DayStoryContentResponse] = {}
+_daystory_image_cache: dict[str, DayStoryImageResponse] = {}
+
+
+@router.post("/stories/daystory", response_model=DayStoryContentResponse)
+async def get_daystory_content(req: DayStoryRequest, request: Request):
+    """
+    Generate the full story narration for a given story.
+
+    Flutter sends {id, title, summary, language}; this endpoint returns
+    the complete narrative text.  The same text is used as context by
+    the Live audio session so the Griot narrates exactly this story.
+
+    Responses are cached by story id — subsequent calls are instant.
+    """
+    if req.id in _daystory_content_cache:
+        return _daystory_content_cache[req.id]
+
+    gemini_pool = request.app.state.gemini_pool
+
+    prompt = (
+        f"You are a master African oral storyteller (Griot).\n"
+        f"Based on the title and summary below, write the complete story\n"
+        f"narration that will be spoken aloud to a listener.\n\n"
+        f"Title: {req.title}\n"
+        f"Summary: {req.summary}\n"
+        f"Language: {req.language}\n\n"
+        f"Rules:\n"
+        f"- Write in {req.language}\n"
+        f"- Use the oral tradition style: warm, rhythmic, culturally authentic\n"
+        f"- Begin with the traditional opening of the relevant culture\n"
+        f"- Include the moral lesson naturally at the end\n"
+        f"- Length: 400-700 words\n"
+        f"- Output ONLY the story text. No title heading, no labels, "
+        f"no reasoning, no meta-commentary whatsoever."
+    )
+    system = (
+        "You are a master African Griot. "
+        "Output only pure story narration text, nothing else."
+    )
+
+    try:
+        parts: list[str] = []
+        async for chunk in gemini_pool.generate_text_stream(
+            prompt=prompt, system_instruction=system
+        ):
+            parts.append(chunk)
+
+        content = _sanitize_story_text("".join(parts))
+        if not content or content.startswith("[Generation error"):
+            raise ValueError("Empty or error response from model")
+
+        result = DayStoryContentResponse(id=req.id, content=content)
+        _daystory_content_cache[req.id] = result
+
+        logger.info(
+            f"DayStory content generated: {req.id}",
+            extra={"event": "daystory_content_generated", "story_id": req.id},
+        )
+        return result
+
+    except Exception as e:
+        logger.error(f"DayStory content generation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Story content generation failed")
+
+
+@router.post("/stories/daystory/image", response_model=DayStoryImageResponse)
+async def get_daystory_image(req: DayStoryRequest, request: Request):
+    """
+    Generate the story illustration for a given story.
+
+    Flutter sends {id, title, summary, language}; this endpoint returns
+    the image URL (Cloud Storage) or base64 data URL as fallback.
+
+    Responses are cached by story id — subsequent calls are instant.
+    This endpoint is intentionally independent from /stories/daystory
+    so Flutter can call both in parallel without one blocking the other.
+    """
+    if req.id in _daystory_image_cache:
+        return _daystory_image_cache[req.id]
+
+    from agents.visual_agent import VisualGenerationAgent
+
+    firestore = request.app.state.firestore
+    agent = VisualGenerationAgent(firestore)
+
+    # Build a rich scene description from title + summary
+    scene = f"{req.title}. {req.summary}"
+
+    try:
+        url = await agent.generate_image(
+            scene_description=scene,
+            culture="African",
+            aspect_ratio="16:9",
+        )
+
+        if url and url.startswith("data:image"):
+            result = DayStoryImageResponse(id=req.id, image_base64=url)
+        elif url:
+            result = DayStoryImageResponse(id=req.id, image_url=url)
+        else:
+            result = DayStoryImageResponse(id=req.id)
+
+        _daystory_image_cache[req.id] = result
+
+        logger.info(
+            f"DayStory image generated: {req.id}",
+            extra={"event": "daystory_image_generated", "story_id": req.id},
+        )
+        return result
+
+    except Exception as e:
+        logger.error(f"DayStory image generation failed: {e}", exc_info=True)
+        # Return empty rather than 500 — image is optional, story still works
+        return DayStoryImageResponse(id=req.id)
 
 
 # ─── Riddle Game Endpoints ───────────────────────────────────────
